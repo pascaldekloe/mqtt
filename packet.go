@@ -72,7 +72,7 @@ func (p *packet) connReq(attr *Attributes) {
 	}
 }
 
-func (p *packet) connAck(code ConnectReturn, sessionPresent bool) {
+func (p *packet) connAck(code connectReturn, sessionPresent bool) {
 	var flags byte
 	if sessionPresent {
 		flags = 1

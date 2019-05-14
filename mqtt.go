@@ -78,10 +78,10 @@ type Will struct {
 }
 
 // ConnectReturn is a response code for connect requests.
-type ConnectReturn byte
+type connectReturn byte
 
 const (
-	accepted ConnectReturn = iota
+	accepted connectReturn = iota
 	// The Server does not support the level of the MQTT protocol requested
 	// by the client.
 	ErrProto
@@ -96,7 +96,7 @@ const (
 )
 
 // Error honors the standard error interface.
-func (code ConnectReturn) Error() string {
+func (code connectReturn) Error() string {
 	const refuse = "mqtt: connection refused: "
 
 	switch code {
