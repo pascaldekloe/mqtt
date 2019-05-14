@@ -49,11 +49,13 @@ func (p *packet) connReq(attr *Attributes) {
 	size += 2 + len(attr.ClientID)
 
 	// compose header
-	p.buf = append(p.buf[:0], connReq<<4, byte(size&127))
+	p.buf = append(p.buf[:0], connReq<<4)
 	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
 		size >>= 7
-		p.buf = append(p.buf, byte(size&127))
 	}
+	p.buf = append(p.buf[:0], byte(size))
+
 	p.buf = append(p.buf, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
 
 	// append payload
@@ -86,13 +88,12 @@ func (p *packet) pub(id uint, topic string, message []byte, deliver QoS) {
 	}
 	size += 2 + len(topic)
 
-	// compose header
-	p.buf = append(p.buf[:0], pubReq<<4|byte(deliver)<<1, byte(size&127))
+	p.buf = append(p.buf[:0], pubReq<<4|byte(deliver)<<1)
 	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
 		size >>= 7
-		p.buf = append(p.buf, byte(size&127))
 	}
-
+	p.buf = append(p.buf[:0], byte(size))
 	p.addString(topic)
 	if deliver != AtMostOnce {
 		p.buf = append(p.buf, byte(id>>8), byte(id))
@@ -120,14 +121,12 @@ func (p *packet) pubComplete(id uint) {
 func (p *packet) subReq(id uint, topicFilter string, deliver QoS) {
 	size := 3 + len(topicFilter)
 
-	// compose header
-	p.buf = append(p.buf[:0], subReq, byte(size&127))
+	p.buf = append(p.buf[:0], subReq<<4)
 	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
 		size >>= 7
-		p.buf = append(p.buf, byte(size&127))
 	}
-	p.buf = append(p.buf, byte(id>>8), byte(id))
-
+	p.buf = append(p.buf[:0], byte(size))
 	p.addString(topicFilter)
 	p.buf = append(p.buf, byte(deliver))
 }
@@ -141,14 +140,13 @@ func (p *packet) subAck(id uint, returnCode byte) {
 func (p *packet) unsubReq(id uint, topicFilter string) {
 	size := 2 + len(topicFilter)
 
-	// compose header
-	p.buf = append(p.buf[:0], unsubReq, byte(size&127))
+	p.buf = append(p.buf[:0], unsubReq<<4)
 	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
 		size >>= 7
-		p.buf = append(p.buf, byte(size&127))
 	}
+	p.buf = append(p.buf[:0], byte(size))
 	p.buf = append(p.buf, byte(id>>8), byte(id))
-
 	p.addString(topicFilter)
 }
 
