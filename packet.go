@@ -2,12 +2,12 @@ package mqtt
 
 // Fixed Packets
 var (
-	pingpacket    = []byte{ping << 4, 0}
-	pongpacket    = []byte{pong << 4, 0}
-	disconnpacket = []byte{disconn << 4, 0}
+	pingPacket    = []byte{ping << 4, 0}
+	pongPacket    = []byte{pong << 4, 0}
+	disconnPacket = []byte{disconn << 4, 0}
 )
 
-// Packet is a codec buffer.
+// Packet is an encoding buffer.
 type packet struct {
 	buf []byte
 }
@@ -118,7 +118,7 @@ func (p *packet) pubComplete(id uint) {
 }
 
 // TODO: batch
-func (p *packet) subReq(id uint, topicFilter string, deliver QoS) {
+func (p *packet) subReq(id uint, topicFilter string, max QoS) {
 	size := 3 + len(topicFilter)
 
 	p.buf = append(p.buf[:0], subReq<<4)
@@ -128,7 +128,7 @@ func (p *packet) subReq(id uint, topicFilter string, deliver QoS) {
 	}
 	p.buf = append(p.buf[:0], byte(size))
 	p.addString(topicFilter)
-	p.buf = append(p.buf, byte(deliver))
+	p.buf = append(p.buf, byte(max))
 }
 
 // TODO: batch

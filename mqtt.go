@@ -40,7 +40,7 @@ const (
 	dupeFlag = 8
 	// Store the application message and its QoS, so that it can be
 	// delivered to future subscribers.
-	retainFlag = 1
+	retainedFlag = 1
 )
 
 // Attributes define the session configuration.
