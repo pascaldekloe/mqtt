@@ -79,10 +79,9 @@ func (p *packet) connAck(code ConnectReturn, sessionPresent bool) {
 	p.buf = append(p.buf[:0], connAck<<4, 2, flags, byte(code))
 }
 
-// TODO: dup & retain flags
-func (p *packet) pub(topic string, message []byte, id uint, deliver QoS) {
+func (p *packet) pub(id uint, topic string, message []byte, deliver QoS) {
 	size := len(message)
-	if deliver != 0 {
+	if deliver != AtMostOnce {
 		size += 2 // packet ID
 	}
 	size += 2 + len(topic)
@@ -95,7 +94,7 @@ func (p *packet) pub(topic string, message []byte, id uint, deliver QoS) {
 	}
 
 	p.addString(topic)
-	if deliver != 0 {
+	if deliver != AtMostOnce {
 		p.buf = append(p.buf, byte(id>>8), byte(id))
 	}
 	p.buf = append(p.buf, message...)

@@ -21,10 +21,10 @@ const (
 	connReq = iota + 1
 	connAck
 	pubReq
-	pubAck
-	pubReceived
-	pubRelease
-	pubComplete
+	pubAck      // QoS 1
+	pubReceived // QoS 2, part Ⅰ
+	pubRelease  // QoS 2, part Ⅱ
+	pubComplete // QoS 2, part Ⅲ
 	subReq
 	subAck
 	unsubReq
@@ -32,6 +32,15 @@ const (
 	ping
 	pong
 	disconn
+)
+
+// Publication Flags
+const (
+	// Indicates that this might be re-delivery of an earlier attempt.
+	dupeFlag = 8
+	// Store the application message and its QoS, so that it can be
+	// delivered to future subscribers.
+	retainFlag = 1
 )
 
 // Attributes define the session configuration.
@@ -71,9 +80,8 @@ type Will struct {
 // ConnectReturn is a response code for connect requests.
 type ConnectReturn byte
 
-// The standard defines 6 response codes.
 const (
-	Accepted ConnectReturn = iota
+	accepted ConnectReturn = iota
 	// The Server does not support the level of the MQTT protocol requested
 	// by the client.
 	ErrProto
@@ -92,7 +100,7 @@ func (code ConnectReturn) Error() string {
 	const refuse = "mqtt: connection refused: "
 
 	switch code {
-	case Accepted:
+	case accepted:
 		return "OK" // not an error
 	case ErrProto:
 		return refuse + "unacceptable protocol version"
