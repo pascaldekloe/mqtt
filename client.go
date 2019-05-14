@@ -2,6 +2,7 @@ package mqtt
 
 import (
 	"context"
+	"fmt"
 	"net"
 )
 
@@ -23,9 +24,60 @@ func Connect(ctx context.Context, conn net.Conn, attrs *Attributes, listener Rec
 	var writePacket packet
 	writePacket.connReq(attrs)
 
-	_, err := conn.Write(writePacket.buf)
-	if err != nil {
-		return nil, err
+	c := make(chan error)
+
+	// launch handshake
+	go func() {
+		defer close(c)
+
+		_, err := conn.Write(writePacket.buf)
+		if err != nil {
+			c <- err
+			return
+		}
+
+		var buf [4]byte
+		n, err := conn.Read(buf[:])
+		for {
+			if n > 0 && buf[0] != connAck<<4 {
+				conn.Close()
+				c <- fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
+				return
+			}
+			if n > 1 && buf[1] != 2 {
+				conn.Close()
+				c <- fmt.Errorf("mqtt: connect acknowledge remaining length is %d instead of 2—connection closed", buf[1])
+				return
+			}
+			if n > 2 && buf[2] > 1 {
+				conn.Close()
+				c <- fmt.Errorf("mqtt: received reserved connect acknowledge flags %#x—connection closed", buf[2])
+				return
+			}
+			if n > 3 {
+				break
+			}
+
+			more, err := conn.Read(buf[n:])
+			if err != nil {
+				c <- err
+				return
+			}
+			n += more
+		}
+
+		if code := connectReturn(buf[3]); code != accepted {
+			c <- code
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case err := <-c:
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &Client{ctx, conn, listener, writePacket}, nil
