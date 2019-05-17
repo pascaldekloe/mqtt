@@ -108,7 +108,7 @@ func (c *Client) Publish(ctx context.Context, topic string, message []byte, deli
 func (c *Client) PublishRetained(ctx context.Context, topic string, message []byte, deliver QoS) error {
 	var id uint
 	c.writePacket.pub(id, topic, message, deliver)
-	c.writePacket.buf[0] |= retainedFlag
+	c.writePacket.buf[0] |= retainFlag
 	if _, err := c.conn.Write(c.writePacket.buf); err != nil {
 		return err
 	}
