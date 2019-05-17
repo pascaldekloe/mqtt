@@ -4,7 +4,15 @@
 // http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
 package mqtt
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrClosed signals an attempt to use the connection after disconnect.
+// Network errors that are not temporary [net.Error.Temporary] cause an
+// automatic disconnect [net.Conn.Close], conform the MQTT protocol.
+var ErrClosed = errors.New("mqtt: connection closed")
 
 // QoS is a delivery definition about the quality of service.
 type QoS uint
