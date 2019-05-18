@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/bits"
 	"net"
 	"time"
 )
@@ -105,7 +106,7 @@ func (c *Client) readLoop() {
 				// not enough data
 				if packetSize > len(buf) {
 					// buff too small
-					grow := make([]byte, packetSize+200)
+					grow := make([]byte, 1<<uint(bits.Len(uint(packetSize))))
 					copy(grow, buf[:bufN])
 					buf = grow
 				}

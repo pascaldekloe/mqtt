@@ -1,3 +1,3 @@
 module github.com/pascaldekloe/mqtt
 
-go 1.0
+go 1.9
