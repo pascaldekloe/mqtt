@@ -22,6 +22,7 @@ type Client struct {
 	writePacket packet
 	retryDelay  time.Duration
 	closed      chan struct{}
+	acceptMax   int
 }
 
 func (c *Client) write(p []byte) error {
@@ -52,46 +53,60 @@ func (c *Client) write(p []byte) error {
 	return nil
 }
 
-// Read is the (single) receive routine on the connection.
 func (c *Client) readLoop() {
 	// determine only here whether closed
 	defer close(c.closed)
 
 	buf := make([]byte, 128)
-	var n int
+	var bufN, flushN int
 	for {
-		more, err := c.conn.Read(buf[n:])
+		read, err := c.conn.Read(buf[bufN:])
+		bufN += read
 		// error handling delayed!
-		// first consume available
-		n += more
+		// consume available first
 
 		var offset int
-		for offset+1 < n {
-			const sizeErr = "mqtt: closing connection on protocol violation: packet size exceeds 4 bytes"
-			sizeVal, sizeN := binary.Uvarint(buf[offset+1 : n])
+		if flushN > 0 {
+			if flushN >= bufN {
+				flushN -= bufN
+				bufN = 0
+			} else {
+				offset = flushN
+			}
+		}
+
+		for offset+1 < bufN {
+			const sizeErr = "mqtt: protocol violation: remaining length declaration exceeds 4 B—connection closed"
+			sizeVal, sizeN := binary.Uvarint(buf[offset+1 : bufN])
 			if sizeN == 0 {
 				// not enough data
-				if n-offset > 4 {
-					log.Print(sizeErr)
+				if bufN-offset > 4 {
 					c.conn.Close()
+					log.Print(sizeErr)
 					return
 				}
 				break
 			}
 			if sizeN < 0 || sizeN > 4 {
-				log.Print(sizeErr)
 				c.conn.Close()
+				log.Print(sizeErr)
 				return
 			}
-			// won't overflow on 32-bit due to previous size check
-			size := int(sizeVal)
 
-			if size < n-offset {
+			// won't overflow due to 4 byte varint limit
+			packetSize := 1 + sizeN + int(sizeVal)
+			if packetSize > c.acceptMax {
+				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.acceptMax)
+				flushN = packetSize
+				break
+			}
+
+			if packetSize < bufN-offset {
 				// not enough data
-				if size > len(buf) {
+				if packetSize > len(buf) {
 					// buff too small
-					grow := make([]byte, size+200)
-					copy(grow, buf[:n])
+					grow := make([]byte, packetSize+200)
+					copy(grow, buf[:bufN])
 					buf = grow
 				}
 				break
@@ -99,13 +114,13 @@ func (c *Client) readLoop() {
 
 			// TODO(pascaldekloe): use packet
 
-			offset += size
+			offset += packetSize
 		}
 
 		if offset > 0 {
 			// move to beginning of buffer
-			copy(buf, buf[offset:n])
-			n -= offset
+			copy(buf, buf[offset:bufN])
+			bufN -= offset
 		}
 
 		switch err {
