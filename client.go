@@ -22,6 +22,7 @@ type Client struct {
 	listener    Receive
 	writePacket packet
 	retryDelay  time.Duration
+	pong        chan struct{}
 	closed      chan struct{}
 	acceptMax   int
 }
@@ -113,7 +114,11 @@ func (c *Client) readLoop() {
 				break
 			}
 
-			// TODO(pascaldekloe): use packet
+			ok := c.inbound(buf[offset], buf[offset+1+sizeN:offset+packetSize])
+			if !ok {
+				c.conn.Close()
+				return
+			}
 
 			offset += packetSize
 		}
@@ -143,6 +148,44 @@ func (c *Client) readLoop() {
 			time.Sleep(delay)
 		}
 	}
+}
+
+func (c *Client) inbound(a byte, p []byte) (ok bool) {
+	switch packetType := a >> 4; packetType {
+	case connReq, subReq, unsubReq, ping, disconn:
+		log.Print("mqtt: close on protocol violation: client received packet type ", packetType)
+
+	case connAck:
+		log.Print("mqtt: close on protocol violation: redunant connection acknowledge")
+
+	case pubReq:
+		// TODO
+
+	case pubAck, pubReceived, pubRelease, pubComplete, unsubAck:
+		if len(p) != 2 {
+			log.Print("mqtt: close on protocol violation: remaining length not 2")
+			return
+		}
+		// TODO: acknowledge uint16(p[0])<<8 | uint16(p[1])
+
+	case subAck:
+		if len(p) != 3 {
+			log.Print("mqtt: close on protocol violation: remaining length not 3")
+			return
+		}
+
+	case pong:
+		if len(p) != 0 {
+			log.Print("mqtt: ping response packet remaining length not 0")
+		}
+		c.pong <- struct{}{}
+		ok = true
+
+	default:
+		log.Print("mqtt: close on protocol violation: received reserved packet type ", packetType)
+	}
+
+	return
 }
 
 // Connect initiates the protocol over a transport layer such as *net.TCP or
@@ -279,16 +322,21 @@ func (c *Client) Unsubscribe(ctx context.Context, topicFilter string) error {
 }
 
 // Ping makes a roundtrip to validate the connection.
-func (c *Client) Ping() error {
+func (c *Client) Ping(ctx context.Context) error {
 	if err := c.write(pingPacket); err != nil {
 		return err
 	}
 
-	panic("TODO: await pong")
+	select {
+	case <-c.pong:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Disconnect is a graceful termination, which also discards the Will.
-// The connection is closed uppon succes.
+// The underlying connection is closed.
 func (c *Client) Disconnect() error {
 	_, err := c.conn.Write(disconnPacket)
 	closeErr := c.conn.Close()
