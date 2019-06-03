@@ -7,6 +7,7 @@ package mqtt
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrClosed signals an attempt to use the connection after disconnect.
@@ -14,7 +15,7 @@ import (
 // automatic disconnect [net.Conn.Close], conform the MQTT protocol.
 var ErrClosed = errors.New("mqtt: connection closed")
 
-// ErrRequestLimit signals too many requests.
+// ErrRequestLimit signals too many client requests.
 var ErrRequestLimit = errors.New("mqtt: maximum number of pending requests reached")
 
 // Protocol Constraints
@@ -79,6 +80,20 @@ type Attributes struct {
 
 	// Timeout in seconds or disabled when zero.
 	KeepAlive uint16
+
+	// Boundary for ErrRequestLimit.
+	// Negative values default to the protocol limit of 64 ki.
+	RequestLimit int
+
+	// Maximum number of bytes for inbound payloads.
+	// Negative values default to the protocol limit of 256 MiB.
+	InSizeLimit int
+
+	// Recovery interval for network errors.
+	RetryDelay time.Duration
+
+	// Limit for network transfer and connection establisment.
+	WireTimeout time.Duration
 }
 
 // Will is a message publication to be send when the

@@ -1,7 +1,7 @@
 package mqtt
 
 import (
-	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,23 +14,80 @@ import (
 // Receive gets invoked for inbound messages. AtMostOnce ignores the return.
 // ExactlyOnce repeates Receive until the return is true and AtLeastOnce may
 // repeat Receive even after the return is true.
-type Receive func(ctx context.Context, topic string, message []byte) bool
+type Receive func(topic string, message []byte) bool
+
+// Conner is an interface for network connection establishment.
+type Connecter func(timeout time.Duration) (net.Conn, error)
+
+// UnsecuredConnecter creates plain network connections.
+// See net.Dial for details on the nework & address syntax.
+func UnsecuredConnecter(network, address string) Connecter {
+	return func(timeout time.Duration) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: timeout}
+		return dialer.Dial(network, address)
+	}
+}
+
+// SecuredConnecter creates TLS network connections.
+// See net.Dial for details on the nework & address syntax.
+func SecuredConnecter(network, address string, conf *tls.Config) Connecter {
+	return func(timeout time.Duration) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: timeout}
+		conn, err := dialer.Dial(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return tls.Client(conn, conf), nil
+	}
+}
 
 // Client manages a connection to one server.
 type Client struct {
 	packetIDs
-	ctx         context.Context
-	conn        net.Conn
-	storage     Storage
-	listener    Receive
+
+	connecter Connecter
+	conn      net.Conn
+	attrs     Attributes
+
 	writePacket packet
-	retryDelay  time.Duration
-	pong        chan struct{}
-	closed      chan struct{}
-	acceptMax   int
+
+	storage Storage
+
+	listener Receive
+
+	pong   chan struct{}
+	closed chan struct{}
+}
+
+func NewClient(transport Connecter, attrs *Attributes) *Client {
+	c := &Client{
+		packetIDs: packetIDs{
+			inUse: make(map[uint]struct{}),
+			limit: attrs.RequestLimit,
+		},
+		connecter: transport,
+		attrs:     *attrs, // copy
+		pong:      make(chan struct{}, 1),
+		closed:    make(chan struct{}),
+	}
+
+	if c.attrs.Will != nil {
+		// make (hidden) copy
+		w := c.attrs.Will
+		c.attrs.Will = new(Will)
+		*c.attrs.Will = *w
+	}
+
+	const requestMax = 0x10000 // 16-bit address space
+	if c.packetIDs.limit < 1 || c.packetIDs.limit > requestMax {
+		c.packetIDs.limit = requestMax
+	}
+
+	return c
 }
 
 func (c *Client) write(p []byte) error {
+	c.conn.SetWriteDeadline(time.Now().Add(c.attrs.WireTimeout))
 	n, err := c.conn.Write(p)
 	for err != nil {
 		select {
@@ -45,9 +102,10 @@ func (c *Client) write(p []byte) error {
 			return err
 		}
 
-		delay := c.retryDelay
+		delay := c.attrs.RetryDelay
 		log.Print("mqtt: send retry in ", delay, " on temporary network error: ", err)
 		time.Sleep(delay)
+		c.conn.SetWriteDeadline(time.Now().Add(c.attrs.WireTimeout))
 
 		var more int
 		more, err = c.conn.Write(p[n:])
@@ -100,8 +158,8 @@ func (c *Client) readLoop() {
 
 			// won't overflow due to 4 byte varint limit
 			packetSize := 1 + sizeN + int(sizeVal)
-			if packetSize > c.acceptMax {
-				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.acceptMax)
+			if packetSize > c.attrs.InSizeLimit {
+				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.attrs.InSizeLimit)
 				flushN = packetSize
 				break
 			}
@@ -146,7 +204,7 @@ func (c *Client) readLoop() {
 				return
 			}
 
-			delay := c.retryDelay
+			delay := c.attrs.RetryDelay
 			log.Print("mqtt: read retry on temporary network error in ", delay, ": ", err)
 			time.Sleep(delay)
 		}
@@ -164,7 +222,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 
 		switch QoS(a>>1) & 3 {
 		case AtMostOnce:
-			c.listener(c.ctx, topic, message)
+			c.listener(topic, message)
 			return
 
 		case AtLeastOnce:
@@ -239,79 +297,65 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 }
 
 // Connect initiates the protocol over a transport layer such as *net.TCP or
-// *tls.Conn. The session context is applied to all the client operations too.
-func Connect(ctx context.Context, conn net.Conn, attrs *Attributes, listener Receive) (*Client, error) {
-	c := &Client{
-		ctx:      ctx,
-		conn:     conn,
-		listener: listener,
-		closed:   make(chan struct{}),
+// *tls.Conn.
+func (c *Client) connect(f Connecter) error {
+	var err error
+	c.conn, err = f(c.attrs.WireTimeout)
+	if err != nil {
+		return err
 	}
 
-	c.writePacket.connReq(attrs)
-
-	done := make(chan error)
+	c.conn.SetDeadline(time.Now().Add(c.attrs.WireTimeout))
 
 	// launch handshake
-	go func() {
-		defer close(done)
-
-		if err := c.write(c.writePacket.buf); err != nil {
-			done <- err
-			return
-		}
-
-		var buf [4]byte
-		n, err := conn.Read(buf[:])
-		if err != nil {
-			done <- err
-			return
-		}
-		for {
-			if n > 0 && buf[0] != connAck<<4 {
-				conn.Close()
-				done <- fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
-				return
-			}
-			if n > 1 && buf[1] != 2 {
-				conn.Close()
-				done <- fmt.Errorf("mqtt: connect acknowledge remaining length is %d instead of 2—connection closed", buf[1])
-				return
-			}
-			if n > 2 && buf[2] > 1 {
-				conn.Close()
-				done <- fmt.Errorf("mqtt: received reserved connect acknowledge flags %#x—connection closed", buf[2])
-				return
-			}
-			if n > 3 {
-				break
-			}
-
-			more, err := conn.Read(buf[n:])
-			if err != nil {
-				done <- err
-				return
-			}
-			n += more
-		}
-
-		if code := connectReturn(buf[3]); code != accepted {
-			done <- code
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case err := <-done:
-		if err != nil {
-			return nil, err
-		}
+	c.writePacket.connReq(&c.attrs)
+	if err := c.write(c.writePacket.buf); err != nil {
+		c.conn.Close()
+		return err
 	}
+
+	var buf [4]byte
+	n, err := c.conn.Read(buf[:])
+	if err != nil {
+		c.conn.Close()
+		return err
+	}
+
+	for {
+		if n > 0 && buf[0] != connAck<<4 {
+			c.conn.Close()
+			return fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
+		}
+		if n > 1 && buf[1] != 2 {
+			c.conn.Close()
+			return fmt.Errorf("mqtt: connect acknowledge remaining length is %d instead of 2—connection closed", buf[1])
+		}
+		if n > 2 && buf[2] > 1 {
+			c.conn.Close()
+			return fmt.Errorf("mqtt: received reserved connect acknowledge flags %#x—connection closed", buf[2])
+		}
+		if n > 3 {
+			break
+		}
+
+		more, err := c.conn.Read(buf[n:])
+		if err != nil {
+			c.conn.Close()
+			return err
+		}
+		n += more
+	}
+
+	if code := connectReturn(buf[3]); code != accepted {
+		c.conn.Close()
+		return code
+	}
+
+	c.conn.SetDeadline(time.Time{}) // clear
 
 	go c.readLoop()
 
-	return c, nil
+	return nil
 }
 
 // Publish persists the message (for network submission). Error returns other
@@ -351,7 +395,7 @@ func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) erro
 
 // Subscribe requests a subscription for all topics that match the filter.
 // The requested quality of service is a maximum for the server.
-func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) error {
+func (c *Client) Subscribe(topicFilter string, max QoS) error {
 	id, err := c.packetIDs.reserve()
 	if err != nil {
 		return err
@@ -366,7 +410,7 @@ func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) err
 }
 
 // Unsubscribe requests a Subscribe cancelation.
-func (c *Client) Unsubscribe(ctx context.Context, topicFilter string) error {
+func (c *Client) Unsubscribe(topicFilter string) error {
 	id, err := c.packetIDs.reserve()
 	if err != nil {
 		return err
@@ -381,17 +425,8 @@ func (c *Client) Unsubscribe(ctx context.Context, topicFilter string) error {
 }
 
 // Ping makes a roundtrip to validate the connection.
-func (c *Client) Ping(ctx context.Context) error {
-	if err := c.write(pingPacket); err != nil {
-		return err
-	}
-
-	select {
-	case <-c.pong:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+func (c *Client) Ping() error {
+	return c.write(pingPacket)
 }
 
 // Disconnect is a graceful termination, which also discards the Will.
