@@ -128,19 +128,26 @@ type Storage interface {
 // ConnectReturn is a response code for connect requests.
 type connectReturn byte
 
-// Connect Request Response Codes
 const (
 	accepted connectReturn = iota
-	// The Server does not support the level of the MQTT protocol requested
-	// by the client.
+
+	// ErrProto means that the server does not support the level of the MQTT
+	// protocol requested by the client.
 	ErrProto
-	// The Client identifier is correct UTF-8 but not allowed by the Server.
+
+	// ErrClientID means that the client identifier is correct UTF-8 but not
+	// allowed by the Server.
 	ErrClientID
-	// The Network Connection has been made but the MQTT service is unavailable.
+
+	// ErrUnavailable means that the network connection has been made but
+	// the MQTT service is unavailable.
 	ErrUnavailable
-	// The data in the user name or password is malformed.
+
+	// ErrAuthBad means that the data in the user name or password is
+	// malformed.
 	ErrAuthBad
-	// The Client is not authorized to connect.
+
+	// ErrAuth means that the client is not authorized to connect.
 	ErrAuth
 )
 
