@@ -14,6 +14,12 @@ import (
 // automatic disconnect [net.Conn.Close], conform the MQTT protocol.
 var ErrClosed = errors.New("mqtt: connection closed")
 
+// Protocol Constraints
+var (
+	ErrTopicName   = errors.New("mqtt: topic name malformed: null [U+0000] character, illegal UTF-8 sequence or size exceeds 64 kiB")
+	ErrMessageSize = errors.New("mqtt: message size exceeds 268 435 451 B minus UTF-8 length of topic name")
+)
+
 // QoS is a delivery definition about the quality of service.
 type QoS uint
 
@@ -83,6 +89,40 @@ type Will struct {
 	Deliver QoS
 	// Persistence constraints.
 	Retain bool
+}
+
+// FreePacketID returns a 16-bit packet identifier which is not in use.
+func newPacketID() uint {
+	panic("TODO")
+}
+
+// FreePacketID releases the identifier
+func freePacketID() uint {
+	panic("TODO")
+}
+
+// LocalPacketIDFlag marks the key in the a local address space.
+const localPacketIDFlag = 1 << 16
+
+// Storage abstracts the internal queue persistence. Malfunction may cause
+//
+// Content is addressed by a 17-bit key, packed in the least significant bits.
+type Storage interface {
+	// Resolves data under the key. Malfunction may cause submission delay.
+	Retreive(key uint) ([]byte, error)
+
+	// Upserts data under the key. Malfunction may cause resubmission with
+	// OnceOrMore or ExactlyOnce deliveries. The Client.Publish operation
+	// fails entirely on Persist errors.
+	Persist(key uint, data []byte) error
+
+	// Removes data under the key. Malfunction may threaten the availability
+	// of Persist in terms of storage space.
+	Delete(key uint)
+
+	// Enumerates available data. Malfunction may prevent new connection
+	// establishment when an existing session is continued!
+	List() (keys []uint, err error)
 }
 
 // ConnectReturn is a response code for connect requests.

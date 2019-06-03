@@ -11,14 +11,16 @@ import (
 	"time"
 )
 
-// Receive is invoked for inbound messages with AtMostOnce or AtLeastOnce QoS.
-// AtLeastOnce causes retries on error returns.
-type Receive func(ctx context.Context, topic string, message []byte) error
+// Receive is invoked for inbound messages. AtMostOnce ignores the return.
+// ExactlyOnce repeates Receive until the return is true and AtLeastOnce may
+// repeat Receive even after the return is true.
+type Receive func(ctx context.Context, topic string, message []byte) bool
 
 // Client manages a connection to one server.
 type Client struct {
 	ctx         context.Context
 	conn        net.Conn
+	storage     Storage
 	listener    Receive
 	writePacket packet
 	retryDelay  time.Duration
@@ -43,7 +45,7 @@ func (c *Client) write(p []byte) error {
 		}
 
 		delay := c.retryDelay
-		log.Print("mqtt: send retry on temporary network error in ", delay, ": ", err)
+		log.Print("mqtt: send retry in ", delay, " on temporary network error: ", err)
 		time.Sleep(delay)
 
 		var more int
@@ -152,21 +154,62 @@ func (c *Client) readLoop() {
 
 func (c *Client) inbound(a byte, p []byte) (ok bool) {
 	switch packetType := a >> 4; packetType {
-	case connReq, subReq, unsubReq, ping, disconn:
-		log.Print("mqtt: close on protocol violation: client received packet type ", packetType)
-
-	case connAck:
-		log.Print("mqtt: close on protocol violation: redunant connection acknowledge")
-
 	case pubReq:
-		// TODO
+		// parse packet
+		i := uint(p[0])<<8 | uint(p[1])
+		topic := string(p[2:i])
+		id := uint(p[i])<<8 | uint(p[i+1])
+		message := p[i+2:]
 
-	case pubAck, pubReceived, pubRelease, pubComplete, unsubAck:
-		if len(p) != 2 {
-			log.Print("mqtt: close on protocol violation: remaining length not 2")
+		switch QoS(a>>1) & 3 {
+		case AtMostOnce:
+			c.listener(c.ctx, topic, message)
+			return
+
+		case AtLeastOnce:
+			c.writePacket.pubAck(id)
+
+		case ExactlyOnce:
+			c.writePacket.pubReceived(id)
+
+		default:
+			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
+			c.conn.Close()
 			return
 		}
-		// TODO: acknowledge uint16(p[0])<<8 | uint16(p[1])
+
+		err := c.storage.Persist(id, message)
+		if err != nil {
+			log.Print("mqtt: reception persistence malfuncion: ", err)
+			return
+		}
+		if err := c.write(c.writePacket.buf); err != nil {
+			log.Print("mqtt: submission publish reception failed on fatal network error: ", err)
+			return
+		}
+		return
+
+	case pubReceived, pubRelease, pubComplete, pubAck, unsubAck:
+		if len(p) != 2 {
+			log.Print("mqtt: close on protocol violation: received packet type ", packetType, " with remaining length ", len(p))
+			c.conn.Close()
+			return
+		}
+		id := uint(binary.BigEndian.Uint16(p))
+
+		if packetType == pubReceived {
+			if err := c.storage.Persist(id, nil); err != nil {
+				log.Print("mqtt: reception persistence malfuncion: ", err)
+				return
+			}
+
+			c.writePacket.pubComplete(id)
+			if err := c.write(c.writePacket.buf); err != nil {
+				log.Print("mqtt: submission publish complete failed on fatal network error: ", err)
+			}
+		} else {
+			c.storage.Delete(id)
+		}
 
 	case subAck:
 		if len(p) != 3 {
@@ -180,6 +223,12 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		}
 		c.pong <- struct{}{}
 		ok = true
+
+	case connReq, subReq, unsubReq, ping, disconn:
+		log.Print("mqtt: close on protocol violation: client received packet type ", packetType)
+
+	case connAck:
+		log.Print("mqtt: close on protocol violation: redunant connection acknowledge")
 
 	default:
 		log.Print("mqtt: close on protocol violation: received reserved packet type ", packetType)
@@ -264,44 +313,40 @@ func Connect(ctx context.Context, conn net.Conn, attrs *Attributes, listener Rec
 	return c, nil
 }
 
-// Publish submits a message on a topic with a specific quality of service.
-// AtMostOnce returns after network submission, AtLeastOnce awaits receival
-// acknowledgement and AtMostOnce undergoes a two-stage acknowledegement.
-func (c *Client) Publish(ctx context.Context, topic string, message []byte, deliver QoS) error {
-	var id uint
+// Publish persists the message (for network submission). Error returns other
+// than ErrTopicName and ErrMessageSize signal fatal Storage malfunction. Thus
+// the actual publication is decoupled from the Publish invokation.
+//
+// Deliver AtMostOnce causes message to be send the server, and that'll be the
+// end of operation. Subscribers may or may not receive the message when subject
+// to error. Use AtLeastOnce or ExactlyOne for more protection, at the cost of
+// higher (performance) overhead.
+//
+// Multiple goroutines may invoke Publish simultaneously.
+func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
+	id := newPacketID()
+
 	c.writePacket.pub(id, topic, message, deliver)
-	if err := c.write(c.writePacket.buf); err != nil {
-		return err
-	}
 
-	if deliver == AtMostOnce {
-		return nil
-	}
-
-	return fmt.Errorf("TODO: QoS %d", deliver)
+	return c.storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
-// server, so that it can be delivered to future subscribers.
-func (c *Client) PublishRetained(ctx context.Context, topic string, message []byte, deliver QoS) error {
-	var id uint
+// server, so that they can be delivered to future subscribers.
+func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
+	id := newPacketID()
+
 	c.writePacket.pub(id, topic, message, deliver)
 	c.writePacket.buf[0] |= retainFlag
-	if err := c.write(c.writePacket.buf); err != nil {
-		return err
-	}
 
-	if deliver == AtMostOnce {
-		return nil
-	}
-
-	return fmt.Errorf("TODO: QoS %d", deliver)
+	return c.storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
 }
 
 // Subscribe requests a subscription for all topics that match the filter.
 // The requested quality of service is a maximum for the server.
 func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) error {
-	var id uint
+	id := newPacketID()
+
 	c.writePacket.subReq(id, topicFilter, max)
 	if err := c.write(c.writePacket.buf); err != nil {
 		return err
@@ -312,7 +357,8 @@ func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) err
 
 // Unsubscribe requests a Subscribe cancelation.
 func (c *Client) Unsubscribe(ctx context.Context, topicFilter string) error {
-	var id uint
+	id := newPacketID()
+
 	c.writePacket.unsubReq(id, topicFilter)
 	if err := c.write(c.writePacket.buf); err != nil {
 		return err
@@ -339,9 +385,11 @@ func (c *Client) Ping(ctx context.Context) error {
 // The underlying connection is closed.
 func (c *Client) Disconnect() error {
 	_, err := c.conn.Write(disconnPacket)
+
 	closeErr := c.conn.Close()
 	if err == nil {
 		err = closeErr
 	}
+
 	return err
 }
