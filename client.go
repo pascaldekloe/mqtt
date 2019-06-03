@@ -11,13 +11,14 @@ import (
 	"time"
 )
 
-// Receive is invoked for inbound messages. AtMostOnce ignores the return.
+// Receive gets invoked for inbound messages. AtMostOnce ignores the return.
 // ExactlyOnce repeates Receive until the return is true and AtLeastOnce may
 // repeat Receive even after the return is true.
 type Receive func(ctx context.Context, topic string, message []byte) bool
 
 // Client manages a connection to one server.
 type Client struct {
+	packetIDs
 	ctx         context.Context
 	conn        net.Conn
 	storage     Storage
@@ -314,8 +315,8 @@ func Connect(ctx context.Context, conn net.Conn, attrs *Attributes, listener Rec
 }
 
 // Publish persists the message (for network submission). Error returns other
-// than ErrTopicName and ErrMessageSize signal fatal Storage malfunction. Thus
-// the actual publication is decoupled from the Publish invokation.
+// than ErrTopicName, ErrMessageSize and ErrRequestLimit signal fatal Storage
+// malfunction. Thus the actual publication is decoupled from the invokation.
 //
 // Deliver AtMostOnce causes message to be send the server, and that'll be the
 // end of operation. Subscribers may or may not receive the message when subject
@@ -324,7 +325,10 @@ func Connect(ctx context.Context, conn net.Conn, attrs *Attributes, listener Rec
 //
 // Multiple goroutines may invoke Publish simultaneously.
 func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
-	id := newPacketID()
+	id, err := c.packetIDs.reserve()
+	if err != nil {
+		return err
+	}
 
 	c.writePacket.pub(id, topic, message, deliver)
 
@@ -334,7 +338,10 @@ func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
 // PublishRetained acts like Publish, but causes the message to be stored on the
 // server, so that they can be delivered to future subscribers.
 func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
-	id := newPacketID()
+	id, err := c.packetIDs.reserve()
+	if err != nil {
+		return err
+	}
 
 	c.writePacket.pub(id, topic, message, deliver)
 	c.writePacket.buf[0] |= retainFlag
@@ -345,7 +352,10 @@ func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) erro
 // Subscribe requests a subscription for all topics that match the filter.
 // The requested quality of service is a maximum for the server.
 func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) error {
-	id := newPacketID()
+	id, err := c.packetIDs.reserve()
+	if err != nil {
+		return err
+	}
 
 	c.writePacket.subReq(id, topicFilter, max)
 	if err := c.write(c.writePacket.buf); err != nil {
@@ -357,7 +367,10 @@ func (c *Client) Subscribe(ctx context.Context, topicFilter string, max QoS) err
 
 // Unsubscribe requests a Subscribe cancelation.
 func (c *Client) Unsubscribe(ctx context.Context, topicFilter string) error {
-	id := newPacketID()
+	id, err := c.packetIDs.reserve()
+	if err != nil {
+		return err
+	}
 
 	c.writePacket.unsubReq(id, topicFilter)
 	if err := c.write(c.writePacket.buf); err != nil {

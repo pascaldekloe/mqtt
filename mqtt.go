@@ -14,6 +14,9 @@ import (
 // automatic disconnect [net.Conn.Close], conform the MQTT protocol.
 var ErrClosed = errors.New("mqtt: connection closed")
 
+// ErrRequestLimit signals too many requests.
+var ErrRequestLimit = errors.New("mqtt: maximum number of pending requests reached")
+
 // Protocol Constraints
 var (
 	ErrTopicName   = errors.New("mqtt: topic name malformed: null [U+0000] character, illegal UTF-8 sequence or size exceeds 64 kiB")
@@ -83,28 +86,21 @@ type Attributes struct {
 type Will struct {
 	// Destination for the message.
 	Topic string
+
 	// Actual payload.
 	Message []byte
+
 	// Delivery constraints.
 	Deliver QoS
+
 	// Persistence constraints.
 	Retain bool
-}
-
-// FreePacketID returns a 16-bit packet identifier which is not in use.
-func newPacketID() uint {
-	panic("TODO")
-}
-
-// FreePacketID releases the identifier.
-func freePacketID() uint {
-	panic("TODO")
 }
 
 // LocalPacketIDFlag marks the key in the a local address space.
 const localPacketIDFlag = 1 << 16
 
-// Storage abstracts the internal queue persistence. Malfunction may cause
+// Storage abstracts the internal queue persistence.
 //
 // Content is addressed by a 17-bit key, packed in the least significant bits.
 type Storage interface {

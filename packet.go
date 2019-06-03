@@ -1,5 +1,7 @@
 package mqtt
 
+import "sync"
+
 // Fixed Packets
 var (
 	pingPacket    = []byte{ping << 4, 0}
@@ -153,4 +155,40 @@ func (p *packet) unsubReq(id uint, topicFilter string) {
 // TODO: batch
 func (p *packet) unsubAck(id uint) {
 	p.buf = append(p.buf[:0], unsubAck<<4, 2, byte(id>>8), byte(id))
+}
+
+// PacketIDs is a 16-bit address space register.
+type packetIDs struct {
+	sync.Mutex
+	last  uint // rountrip counter
+	inUse map[uint]struct{}
+	limit int // inUse size boundary
+}
+
+// Reserve locks a free identifier.
+func (pids *packetIDs) reserve() (uint, error) {
+	pids.Lock()
+	defer pids.Unlock()
+
+	if len(pids.inUse) >= pids.limit {
+		return 0, ErrRequestLimit
+	}
+
+	id := pids.last
+	for {
+		id = (id + 1) & 0xffff
+
+		if _, ok := pids.inUse[id]; !ok {
+			pids.inUse[id] = struct{}{}
+			pids.last = id
+			return id, nil
+		}
+	}
+}
+
+// Free releases the identifier.
+func (pids *packetIDs) free(id uint) {
+	pids.Lock()
+	delete(pids.inUse, id)
+	pids.Unlock()
 }
