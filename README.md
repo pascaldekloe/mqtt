@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/pascaldekloe/mqtt.svg?branch=master)](https://travis-ci.org/pascaldekloe/mqtt)
+
 # About
 
 … an MQTT library for the Go programming language.
