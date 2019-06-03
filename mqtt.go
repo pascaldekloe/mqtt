@@ -20,7 +20,7 @@ var (
 	ErrMessageSize = errors.New("mqtt: message size exceeds 268 435 451 B minus UTF-8 length of topic name")
 )
 
-// QoS is a delivery definition about the quality of service.
+// QoS defines the delivery quality of service.
 type QoS uint
 
 // Quality of Service Levels
@@ -96,7 +96,7 @@ func newPacketID() uint {
 	panic("TODO")
 }
 
-// FreePacketID releases the identifier
+// FreePacketID releases the identifier.
 func freePacketID() uint {
 	panic("TODO")
 }
@@ -128,6 +128,7 @@ type Storage interface {
 // ConnectReturn is a response code for connect requests.
 type connectReturn byte
 
+// Connect Request Response Codes
 const (
 	accepted connectReturn = iota
 	// The Server does not support the level of the MQTT protocol requested
