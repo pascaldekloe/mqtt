@@ -16,32 +16,34 @@ import (
 // repeat Receive even after the return is true.
 type Receive func(topic string, message []byte) bool
 
-// Conner is an interface for network connection establishment.
-type Connecter func(timeout time.Duration) (net.Conn, error)
+// Connecter abstracts the transport layer establishment.
+type Connecter func() (net.Conn, error)
 
 // UnsecuredConnecter creates plain network connections.
-// See net.Dial for details on the nework & address syntax.
-func UnsecuredConnecter(network, address string) Connecter {
-	return func(timeout time.Duration) (net.Conn, error) {
-		dialer := net.Dialer{Timeout: timeout}
+// See net.Dial for details on the network & address syntax.
+// With or without a timeout, the operating system may still
+// impose its own earlier timeout. For example, TCP timeouts
+// are often around 3 minutes.
+func UnsecuredConnecter(network, address string, timeout time.Duration) Connecter {
+	dialer := &net.Dialer{Timeout: timeout}
+	return func() (net.Conn, error) {
 		return dialer.Dial(network, address)
 	}
 }
 
 // SecuredConnecter creates TLS network connections.
-// See net.Dial for details on the nework & address syntax.
-func SecuredConnecter(network, address string, conf *tls.Config) Connecter {
-	return func(timeout time.Duration) (net.Conn, error) {
-		dialer := net.Dialer{Timeout: timeout}
-		conn, err := dialer.Dial(network, address)
-		if err != nil {
-			return nil, err
-		}
-		return tls.Client(conn, conf), nil
+// See net.Dial for details on the network & address syntax.
+// With or without a timeout, the operating system may still
+// impose its own earlier timeout. For example, TCP timeouts
+// are often around 3 minutes.
+func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Duration) Connecter {
+	dialer := &tls.Dialer{&net.Dialer{Timeout: timeout}, conf}
+	return func() (net.Conn, error) {
+		return dialer.Dial(network, address)
 	}
 }
 
-// Client manages a connection to one server.
+// Client manages a single network connection.
 type Client struct {
 	packetIDs
 
@@ -296,14 +298,13 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 	return
 }
 
-// Connect initiates the protocol over a transport layer such as *net.TCP or
-// *tls.Conn.
-func (c *Client) connect(f Connecter) error {
-	var err error
-	c.conn, err = f(c.attrs.WireTimeout)
+// Connect initiates the transport layer (c.Conn).
+func (c *Client) connect() error {
+	conn, err := c.connecter()
 	if err != nil {
 		return err
 	}
+	c.conn = conn
 
 	c.conn.SetDeadline(time.Now().Add(c.attrs.WireTimeout))
 
