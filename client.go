@@ -43,17 +43,39 @@ func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Du
 	}
 }
 
+// ClientConfig defines Client settings.
+type ClientConfig struct {
+	Connecter // remote target
+
+	SessionConfig
+
+	// Enable AtLeastOnce and ExactlyOnce when set.
+	Storage
+
+	// Boundary for ErrRequestLimit.
+	// Negative values default to the protocol limit of 64 ki.
+	RequestLimit int
+
+	// Maximum number of bytes for inbound payloads.
+	// Negative values default to the protocol limit of 256 MiB.
+	InSizeLimit int
+
+	// Backoff on transport errors.
+	RetryDelay time.Duration
+
+	// Limit for transport unit exchange.
+	WireTimeout time.Duration
+}
+
 // Client manages a single network connection.
 type Client struct {
+	ClientConfig // read-only
+
 	packetIDs
 
-	connecter Connecter
-	conn      net.Conn
-	attrs     Attributes
+	conn net.Conn
 
 	writePacket packet
-
-	storage Storage
 
 	listener Receive
 
@@ -61,23 +83,20 @@ type Client struct {
 	closed chan struct{}
 }
 
-func NewClient(transport Connecter, attrs *Attributes) *Client {
+func NewClient(config *ClientConfig) *Client {
 	c := &Client{
+		ClientConfig: *config, // copy
 		packetIDs: packetIDs{
 			inUse: make(map[uint]struct{}),
-			limit: attrs.RequestLimit,
+			limit: config.RequestLimit,
 		},
-		connecter: transport,
-		attrs:     *attrs, // copy
-		pong:      make(chan struct{}, 1),
-		closed:    make(chan struct{}),
+		pong:   make(chan struct{}, 1),
+		closed: make(chan struct{}),
 	}
 
-	if c.attrs.Will != nil {
-		// make (hidden) copy
-		w := c.attrs.Will
-		c.attrs.Will = new(Will)
-		*c.attrs.Will = *w
+	if c.Will != nil {
+		willCopy := *c.Will
+		c.Will = &willCopy
 	}
 
 	const requestMax = 0x10000 // 16-bit address space
@@ -89,7 +108,7 @@ func NewClient(transport Connecter, attrs *Attributes) *Client {
 }
 
 func (c *Client) write(p []byte) error {
-	c.conn.SetWriteDeadline(time.Now().Add(c.attrs.WireTimeout))
+	c.conn.SetWriteDeadline(time.Now().Add(c.WireTimeout))
 	n, err := c.conn.Write(p)
 	for err != nil {
 		select {
@@ -104,10 +123,10 @@ func (c *Client) write(p []byte) error {
 			return err
 		}
 
-		delay := c.attrs.RetryDelay
+		delay := c.RetryDelay
 		log.Print("mqtt: send retry in ", delay, " on temporary network error: ", err)
 		time.Sleep(delay)
-		c.conn.SetWriteDeadline(time.Now().Add(c.attrs.WireTimeout))
+		c.conn.SetWriteDeadline(time.Now().Add(c.WireTimeout))
 
 		var more int
 		more, err = c.conn.Write(p[n:])
@@ -160,8 +179,8 @@ func (c *Client) readLoop() {
 
 			// won't overflow due to 4 byte varint limit
 			packetSize := 1 + sizeN + int(sizeVal)
-			if packetSize > c.attrs.InSizeLimit {
-				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.attrs.InSizeLimit)
+			if packetSize > c.InSizeLimit {
+				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.InSizeLimit)
 				flushN = packetSize
 				break
 			}
@@ -206,7 +225,7 @@ func (c *Client) readLoop() {
 				return
 			}
 
-			delay := c.attrs.RetryDelay
+			delay := c.RetryDelay
 			log.Print("mqtt: read retry on temporary network error in ", delay, ": ", err)
 			time.Sleep(delay)
 		}
@@ -222,7 +241,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		id := uint(p[i])<<8 | uint(p[i+1])
 		message := p[i+2:]
 
-		switch QoS(a>>1) & 3 {
+		switch (a >> 1) & 3 {
 		case AtMostOnce:
 			c.listener(topic, message)
 			return
@@ -233,13 +252,13 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		case ExactlyOnce:
 			c.writePacket.pubReceived(id)
 
-		default:
+		case reservedQoS3:
 			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
 			c.conn.Close()
 			return
 		}
 
-		err := c.storage.Persist(id, message)
+		err := c.Storage.Persist(id, message)
 		if err != nil {
 			log.Print("mqtt: reception persistence malfuncion: ", err)
 			return
@@ -259,7 +278,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		id := uint(binary.BigEndian.Uint16(p))
 
 		if packetType == pubReceived {
-			if err := c.storage.Persist(id, nil); err != nil {
+			if err := c.Storage.Persist(id, nil); err != nil {
 				log.Print("mqtt: reception persistence malfuncion: ", err)
 				return
 			}
@@ -269,7 +288,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 				log.Print("mqtt: submission publish complete failed on fatal network error: ", err)
 			}
 		} else {
-			c.storage.Delete(id)
+			c.Storage.Delete(id)
 		}
 
 	case subAck:
@@ -300,16 +319,16 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 
 // Connect initiates the transport layer (c.Conn).
 func (c *Client) connect() error {
-	conn, err := c.connecter()
+	conn, err := c.Connecter()
 	if err != nil {
 		return err
 	}
 	c.conn = conn
 
-	c.conn.SetDeadline(time.Now().Add(c.attrs.WireTimeout))
+	c.conn.SetDeadline(time.Now().Add(c.WireTimeout))
 
 	// launch handshake
-	c.writePacket.connReq(&c.attrs)
+	c.writePacket.connReq(&c.SessionConfig)
 	if err := c.write(c.writePacket.buf); err != nil {
 		c.conn.Close()
 		return err
@@ -377,7 +396,7 @@ func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
 
 	c.writePacket.pub(id, topic, message, deliver)
 
-	return c.storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
+	return c.Storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
@@ -391,7 +410,7 @@ func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) erro
 	c.writePacket.pub(id, topic, message, deliver)
 	c.writePacket.buf[0] |= retainFlag
 
-	return c.storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
+	return c.Storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
 }
 
 // Subscribe requests a subscription for all topics that match the filter.

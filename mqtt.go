@@ -7,7 +7,6 @@ package mqtt
 import (
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ErrClosed signals an attempt to use the connection after disconnect.
@@ -20,8 +19,8 @@ var ErrRequestLimit = errors.New("mqtt: maximum number of pending requests reach
 
 // Protocol Constraints
 var (
-	ErrTopicName   = errors.New("mqtt: topic name malformed: null [U+0000] character, illegal UTF-8 sequence or size exceeds 64 kiB")
-	ErrMessageSize = errors.New("mqtt: message size exceeds 268 435 451 B minus UTF-8 length of topic name")
+	ErrTopicName   = errors.New("mqtt: malformed topic name: null [U+0000] character, illegal UTF-8 sequence or size exceeds 64 kiB")
+	ErrMessageSize = errors.New("mqtt: message size exceeds 268,435,451 B minus UTF-8 length of topic name")
 )
 
 // QoS defines the delivery quality of service.
@@ -29,9 +28,10 @@ type QoS uint
 
 // Quality of Service Levels
 const (
-	AtMostOnce QoS = iota
-	AtLeastOnce
-	ExactlyOnce
+	AtMostOnce   = iota // fire and forget
+	AtLeastOnce         // network round trip + Storage
+	ExactlyOnce         // two network round trips + Storage
+	reservedQoS3        // must not be used
 )
 
 // Control Packet Types
@@ -39,10 +39,10 @@ const (
 	connReq = iota + 1
 	connAck
 	pubReq
-	pubAck      // QoS 1
-	pubReceived // QoS 2, part Ⅰ
-	pubRelease  // QoS 2, part Ⅱ
-	pubComplete // QoS 2, part Ⅲ
+	pubAck      // QoS 1 confirm
+	pubReceived // QoS 2 confirm, part Ⅰ
+	pubRelease  // QoS 2 confirm, part Ⅱ
+	pubComplete // QoS 2 confirm, part Ⅲ
 	subReq
 	subAck
 	unsubReq
@@ -61,10 +61,9 @@ const (
 	retainFlag = 1
 )
 
-// Attributes define the session configuration.
-type Attributes struct {
-	// Required for the server to uniquely
-	// identify the client (session).
+// SessionConfig defines protocol settings.
+type SessionConfig struct {
+	// Required for the server to uniquely identify the session.
 	ClientID string
 
 	// Optional identification claim.
@@ -72,7 +71,7 @@ type Attributes struct {
 	// Optional credentials.
 	Password []byte
 
-	// Discards any state at the server.
+	// Discard any previous session (on the server) and start a new one.
 	CleanSession bool
 
 	// Termination contract or disabled when nil.
@@ -80,20 +79,6 @@ type Attributes struct {
 
 	// Timeout in seconds or disabled when zero.
 	KeepAlive uint16
-
-	// Boundary for ErrRequestLimit.
-	// Negative values default to the protocol limit of 64 ki.
-	RequestLimit int
-
-	// Maximum number of bytes for inbound payloads.
-	// Negative values default to the protocol limit of 256 MiB.
-	InSizeLimit int
-
-	// Recovery interval for network errors.
-	RetryDelay time.Duration
-
-	// Limit for network transfer and connection establisment.
-	WireTimeout time.Duration
 }
 
 // Will is a message publication to be send when the

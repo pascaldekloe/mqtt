@@ -24,19 +24,19 @@ func (p *packet) addBytes(b []byte) {
 	p.buf = append(p.buf, b...)
 }
 
-func (p *packet) connReq(attr *Attributes) {
+func (p *packet) connReq(config *SessionConfig) {
 	size := 6 // variable header
 
 	var flags uint
-	if attr.UserName != "" {
-		size += 2 + len(attr.UserName)
+	if config.UserName != "" {
+		size += 2 + len(config.UserName)
 		flags |= 1 << 7
 	}
-	if attr.Password != nil {
-		size += 2 + len(attr.Password)
+	if config.Password != nil {
+		size += 2 + len(config.Password)
 		flags |= 1 << 6
 	}
-	if w := attr.Will; w != nil {
+	if w := config.Will; w != nil {
 		size += 2 + len(w.Topic)
 		size += 2 + len(w.Message)
 		if w.Retain {
@@ -45,10 +45,10 @@ func (p *packet) connReq(attr *Attributes) {
 		flags |= uint(w.Deliver) << 3
 		flags |= 1 << 2
 	}
-	if attr.CleanSession {
+	if config.CleanSession {
 		flags |= 1 << 1
 	}
-	size += 2 + len(attr.ClientID)
+	size += 2 + len(config.ClientID)
 
 	// compose header
 	p.buf = append(p.buf[:0], connReq<<4)
@@ -61,16 +61,16 @@ func (p *packet) connReq(attr *Attributes) {
 	p.buf = append(p.buf, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
 
 	// append payload
-	p.addString(attr.ClientID)
-	if w := attr.Will; w != nil {
+	p.addString(config.ClientID)
+	if w := config.Will; w != nil {
 		p.addString(w.Topic)
 		p.addBytes(w.Message)
 	}
-	if attr.UserName != "" {
-		p.addString(attr.UserName)
+	if config.UserName != "" {
+		p.addString(config.UserName)
 	}
-	if attr.Password != nil {
-		p.addBytes(attr.Password)
+	if config.Password != nil {
+		p.addBytes(config.Password)
 	}
 }
 
