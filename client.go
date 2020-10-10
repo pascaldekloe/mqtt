@@ -3,6 +3,7 @@ package mqtt
 import (
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -136,17 +137,32 @@ func (c *Client) write(p []byte) error {
 	return nil
 }
 
+// ErrProtoReset signals illegal reception from the server.
+var errProtoReset = errors.New("mqtt: connection reset on protocol violation")
+
 func (c *Client) readLoop() {
 	// determine only here whether closed
 	defer close(c.closed)
 
+	for {
+		c.reconnect()
+		err := c.read()
+		if errors.Is(err, ErrClosed) {
+			return
+		}
+		log.Print(err)
+	}
+}
+
+var errRemainingLength = fmt.Errorf("%w: remaining length declaration exceeds 4 B", errProtoReset)
+
+func (c *Client) read() error {
 	buf := make([]byte, 128)
 	var bufN, flushN int
 	for {
 		read, err := c.conn.Read(buf[bufN:])
 		bufN += read
-		// error handling delayed!
-		// consume available first
+		// Error handling delayed! Consume available first.
 
 		var offset int
 		if flushN > 0 {
@@ -159,21 +175,16 @@ func (c *Client) readLoop() {
 		}
 
 		for offset+1 < bufN {
-			const sizeErr = "mqtt: protocol violation: remaining length declaration exceeds 4 B—connection closed"
 			sizeVal, sizeN := binary.Uvarint(buf[offset+1 : bufN])
 			if sizeN == 0 {
 				// not enough data
 				if bufN-offset > 4 {
-					c.conn.Close()
-					log.Print(sizeErr)
-					return
+					return errRemainingLength
 				}
 				break
 			}
 			if sizeN < 0 || sizeN > 4 {
-				c.conn.Close()
-				log.Print(sizeErr)
-				return
+				return errRemainingLength
 			}
 
 			// won't overflow due to 4 byte varint limit
@@ -195,10 +206,9 @@ func (c *Client) readLoop() {
 				break
 			}
 
-			ok := c.inbound(buf[offset], buf[offset+1+sizeN:offset+packetSize])
-			if !ok {
-				c.conn.Close()
-				return
+			err := c.inbound(buf[offset], buf[offset+1+sizeN:offset+packetSize])
+			if err != nil {
+				return err
 			}
 
 			offset += packetSize
@@ -215,13 +225,11 @@ func (c *Client) readLoop() {
 			break
 
 		case io.EOF:
-			return
+			return err
 
 		default:
 			if e, ok := err.(net.Error); !ok || !e.Temporary() {
-				log.Print("mqtt: closing connection on read error: ", err)
-				c.conn.Close()
-				return
+				return err
 			}
 
 			delay := c.RetryDelay
@@ -231,7 +239,7 @@ func (c *Client) readLoop() {
 	}
 }
 
-func (c *Client) inbound(a byte, p []byte) (ok bool) {
+func (c *Client) inbound(a byte, p []byte) error {
 	switch packetType := a >> 4; packetType {
 	case pubMsg:
 		// parse packet
@@ -255,28 +263,24 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 			copy(bytes[len(topic)+1:], message)
 			err := c.Storage.Persist(packetID, bytes)
 			if err != nil {
-				log.Print("mqtt: reception persistence malfuncion: ", err)
-				return
+				log.Print("mqtt: persistence malfuncion: ", err)
+				return nil // don't confirm
 			}
 			c.outQ <- newPubReceived(packetID)
 
-		case reservedQoS3 << 1:
-			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
-			c.conn.Close()
-			return
+		default:
+			return fmt.Errorf("%w: received publish with reserved QoS", errProtoReset)
 		}
 
 	case pubRelease: // second round trip for ExactlyOnce reception
 		if len(p) != 2 {
-			log.Print("mqtt: close on protocol violation: received packet type ", packetType, " with remaining length ", len(p))
-			c.conn.Close()
-			return
+			return fmt.Errorf("%w: received publish release with remaining length %d", errProtoReset, len(p))
 		}
 		packetID := uint(binary.BigEndian.Uint16(p))
 		bytes, err := c.Storage.Retreive(packetID)
 		if err != nil {
-			log.Print("mqtt: reception persistence malfuncion: ", err)
-			return
+			log.Print("mqtt: persistence malfuncion: ", err)
+			return nil
 		}
 		if bytes != nil {
 			for i, b := range bytes {
@@ -284,7 +288,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 					topic := string(bytes[:i])
 					message := bytes[i+1:]
 					if !c.listener(topic, message) {
-						return
+						return nil // don't confirm; keep in storage
 					}
 					break
 				}
@@ -295,16 +299,14 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 
 	case pubReceived, pubComplete, pubAck, unsubAck:
 		if len(p) != 2 {
-			log.Print("mqtt: close on protocol violation: received packet type ", packetType, " with remaining length ", len(p))
-			c.conn.Close()
-			return
+			return fmt.Errorf("%w: received packet type %d with remaining length %d", errProtoReset, packetType, len(p))
 		}
 		id := uint(binary.BigEndian.Uint16(p))
 
 		if packetType == pubReceived {
 			if err := c.Storage.Persist(id, nil); err != nil {
-				log.Print("mqtt: reception persistence malfuncion: ", err)
-				return
+				log.Print("mqtt: persistence malfuncion: ", err)
+				return nil
 			}
 
 			c.outQ <- newPubComplete(id)
@@ -314,31 +316,35 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 
 	case subAck:
 		if len(p) != 3 {
-			log.Print("mqtt: close on protocol violation: remaining length not 3")
-			return
+			return fmt.Errorf("%w: received subscribe acknowledge with remaining length %d", errProtoReset, len(p))
 		}
 
 	case pong:
 		if len(p) != 0 {
-			log.Print("mqtt: ping response packet remaining length not 0")
+			return fmt.Errorf("%w: received ping request with remaining length %d", errProtoReset, len(p))
 		}
 		c.outQ <- pongPacket
 
 	case connReq, subReq, unsubReq, ping, disconn:
-		log.Print("mqtt: close on protocol violation: client received packet type ", packetType)
+		return fmt.Errorf("%w: received packet type %d", errProtoReset, packetType)
 
 	case connAck:
-		log.Print("mqtt: close on protocol violation: redunant connection acknowledge")
+		return fmt.Errorf("%w: received redundant connection acknowledge", errProtoReset)
 
 	default:
-		log.Print("mqtt: close on protocol violation: received reserved packet type ", packetType)
+		return fmt.Errorf("%w: received reserved packet type %d", errProtoReset, packetType)
 	}
 
-	return
+	return nil
 }
 
-// Connect initiates the transport layer (c.Conn).
-func (c *Client) connect() error {
+// Reconnect initiates the transport layer (c.conn).
+// The current connection (if any) is terminated.
+func (c *Client) reconnect() error {
+	if c.conn != nil {
+		c.conn.Close()
+	}
+
 	conn, err := c.Connecter()
 	if err != nil {
 		return err
@@ -349,28 +355,23 @@ func (c *Client) connect() error {
 
 	// launch handshake
 	if err := c.write(newConnReq(&c.SessionConfig).buf); err != nil {
-		c.conn.Close()
 		return err
 	}
 
 	var buf [4]byte
 	n, err := c.conn.Read(buf[:])
 	if err != nil {
-		c.conn.Close()
 		return err
 	}
 
 	for {
 		if n > 0 && buf[0] != connAck<<4 {
-			c.conn.Close()
 			return fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
 		}
 		if n > 1 && buf[1] != 2 {
-			c.conn.Close()
 			return fmt.Errorf("mqtt: connect acknowledge remaining length is %d instead of 2—connection closed", buf[1])
 		}
 		if n > 2 && buf[2] > 1 {
-			c.conn.Close()
 			return fmt.Errorf("mqtt: received reserved connect acknowledge flags %#x—connection closed", buf[2])
 		}
 		if n > 3 {
@@ -379,20 +380,16 @@ func (c *Client) connect() error {
 
 		more, err := c.conn.Read(buf[n:])
 		if err != nil {
-			c.conn.Close()
 			return err
 		}
 		n += more
 	}
 
 	if code := connectReturn(buf[3]); code != accepted {
-		c.conn.Close()
 		return code
 	}
 
 	c.conn.SetDeadline(time.Time{}) // clear
-
-	go c.readLoop()
 
 	return nil
 }
