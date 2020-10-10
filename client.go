@@ -75,12 +75,11 @@ type Client struct {
 
 	conn net.Conn
 
-	respQ chan *packet // high-prority send queue
-	keyQ  chan uint    // storage send queue
+	outQ chan *packet // high-prority send queue
+	keyQ chan uint    // storage send queue
 
 	listener Receive
 
-	pong   chan struct{}
 	closed chan struct{}
 }
 
@@ -91,7 +90,6 @@ func NewClient(config *ClientConfig) *Client {
 			inUse: make(map[uint]struct{}),
 			limit: config.RequestLimit,
 		},
-		pong:   make(chan struct{}, 1),
 		closed: make(chan struct{}),
 	}
 
@@ -248,7 +246,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 
 		case AtLeastOnce << 1:
 			if c.listener(topic, message) {
-				c.respQ <- newPubAck(packetID)
+				c.outQ <- newPubAck(packetID)
 			}
 
 		case ExactlyOnce << 1:
@@ -260,7 +258,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 				log.Print("mqtt: reception persistence malfuncion: ", err)
 				return
 			}
-			c.respQ <- newPubReceived(packetID)
+			c.outQ <- newPubReceived(packetID)
 
 		case reservedQoS3 << 1:
 			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
@@ -293,7 +291,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 			}
 			c.Storage.Delete(packetID)
 		}
-		c.respQ <- newPubComplete(packetID)
+		c.outQ <- newPubComplete(packetID)
 
 	case pubReceived, pubComplete, pubAck, unsubAck:
 		if len(p) != 2 {
@@ -309,7 +307,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 				return
 			}
 
-			c.respQ <- newPubComplete(id)
+			c.outQ <- newPubComplete(id)
 		} else {
 			c.Storage.Delete(id)
 		}
@@ -324,8 +322,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		if len(p) != 0 {
 			log.Print("mqtt: ping response packet remaining length not 0")
 		}
-		c.pong <- struct{}{}
-		ok = true
+		c.outQ <- pongPacket
 
 	case connReq, subReq, unsubReq, ping, disconn:
 		log.Print("mqtt: close on protocol violation: client received packet type ", packetType)
@@ -480,13 +477,15 @@ func (c *Client) Unsubscribe(topicFilter string) error {
 
 // Ping makes a roundtrip to validate the connection.
 func (c *Client) Ping() error {
-	return c.write(pingPacket)
+	c.outQ <- pingPacket
+
+	panic("TODO: await ack")
 }
 
 // Disconnect is a graceful termination, which also discards the Will.
 // The underlying connection is closed.
 func (c *Client) Disconnect() error {
-	_, err := c.conn.Write(disconnPacket)
+	_, err := c.conn.Write(disconnPacket.buf)
 
 	closeErr := c.conn.Close()
 	if err == nil {

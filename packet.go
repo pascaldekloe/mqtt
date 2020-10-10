@@ -4,9 +4,9 @@ import "sync"
 
 // Fixed Packets
 var (
-	pingPacket    = []byte{ping << 4, 0}
-	pongPacket    = []byte{pong << 4, 0}
-	disconnPacket = []byte{disconn << 4, 0}
+	pingPacket    = &packet{[]byte{ping << 4, 0}}
+	pongPacket    = &packet{[]byte{pong << 4, 0}}
+	disconnPacket = &packet{[]byte{disconn << 4, 0}}
 )
 
 var packetPool = sync.Pool{New: func() interface{} { return new(packet) }}
