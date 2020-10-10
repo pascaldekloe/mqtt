@@ -75,8 +75,6 @@ type Client struct {
 
 	conn net.Conn
 
-	writePacket packet
-
 	listener Receive
 
 	pong   chan struct{}
@@ -241,16 +239,17 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 		id := uint(p[i])<<8 | uint(p[i+1])
 		message := p[i+2:]
 
+		var resp *packet
 		switch (a >> 1) & 3 {
 		case AtMostOnce:
 			c.listener(topic, message)
 			return
 
 		case AtLeastOnce:
-			c.writePacket.pubAck(id)
+			resp = newPubAck(id)
 
 		case ExactlyOnce:
-			c.writePacket.pubReceived(id)
+			resp = newPubReceived(id)
 
 		case reservedQoS3:
 			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
@@ -263,7 +262,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 			log.Print("mqtt: reception persistence malfuncion: ", err)
 			return
 		}
-		if err := c.write(c.writePacket.buf); err != nil {
+		if err := c.write(resp.buf); err != nil {
 			log.Print("mqtt: submission publish reception failed on fatal network error: ", err)
 			return
 		}
@@ -283,8 +282,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 				return
 			}
 
-			c.writePacket.pubComplete(id)
-			if err := c.write(c.writePacket.buf); err != nil {
+			if err := c.write(newPubComplete(id).buf); err != nil {
 				log.Print("mqtt: submission publish complete failed on fatal network error: ", err)
 			}
 		} else {
@@ -328,8 +326,7 @@ func (c *Client) connect() error {
 	c.conn.SetDeadline(time.Now().Add(c.WireTimeout))
 
 	// launch handshake
-	c.writePacket.connReq(&c.SessionConfig)
-	if err := c.write(c.writePacket.buf); err != nil {
+	if err := c.write(newConnReq(&c.SessionConfig).buf); err != nil {
 		c.conn.Close()
 		return err
 	}
@@ -394,9 +391,9 @@ func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
 		return err
 	}
 
-	c.writePacket.pub(id, topic, message, deliver)
+	packet := newPub(id, topic, message, deliver)
 
-	return c.Storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
+	return c.Storage.Persist(id|localPacketIDFlag, packet.buf)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
@@ -407,10 +404,10 @@ func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) erro
 		return err
 	}
 
-	c.writePacket.pub(id, topic, message, deliver)
-	c.writePacket.buf[0] |= retainFlag
+	packet := newPub(id, topic, message, deliver)
+	packet.buf[0] |= retainFlag
 
-	return c.Storage.Persist(id|localPacketIDFlag, c.writePacket.buf)
+	return c.Storage.Persist(id|localPacketIDFlag, packet.buf)
 }
 
 // Subscribe requests a subscription for all topics that match the filter.
@@ -421,8 +418,7 @@ func (c *Client) Subscribe(topicFilter string, max QoS) error {
 		return err
 	}
 
-	c.writePacket.subReq(id, topicFilter, max)
-	if err := c.write(c.writePacket.buf); err != nil {
+	if err := c.write(newSubReq(id, topicFilter, max).buf); err != nil {
 		return err
 	}
 
@@ -436,8 +432,7 @@ func (c *Client) Unsubscribe(topicFilter string) error {
 		return err
 	}
 
-	c.writePacket.unsubReq(id, topicFilter)
-	if err := c.write(c.writePacket.buf); err != nil {
+	if err := c.write(newUnsubReq(id, topicFilter).buf); err != nil {
 		return err
 	}
 

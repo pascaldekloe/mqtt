@@ -9,6 +9,8 @@ var (
 	disconnPacket = []byte{disconn << 4, 0}
 )
 
+var packetPool = sync.Pool{New: func() interface{} { return new(packet) }}
+
 // Packet is an encoding buffer.
 type packet struct {
 	buf []byte
@@ -24,7 +26,7 @@ func (p *packet) addBytes(b []byte) {
 	p.buf = append(p.buf, b...)
 }
 
-func (p *packet) connReq(config *SessionConfig) {
+func newConnReq(config *SessionConfig) *packet {
 	size := 6 // variable header
 
 	var flags uint
@@ -50,6 +52,8 @@ func (p *packet) connReq(config *SessionConfig) {
 	}
 	size += 2 + len(config.ClientID)
 
+	p := packetPool.Get().(*packet)
+
 	// compose header
 	p.buf = append(p.buf[:0], connReq<<4)
 	for size > 127 {
@@ -72,24 +76,29 @@ func (p *packet) connReq(config *SessionConfig) {
 	if config.Password != nil {
 		p.addBytes(config.Password)
 	}
+
+	return p
 }
 
-func (p *packet) connAck(code connectReturn, sessionPresent bool) {
+func newConnAck(code connectReturn, sessionPresent bool) *packet {
 	var flags byte
 	if sessionPresent {
 		flags = 1
 	}
 
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], connAck<<4, 2, flags, byte(code))
+	return p
 }
 
-func (p *packet) pub(id uint, topic string, message []byte, deliver QoS) {
+func newPub(id uint, topic string, message []byte, deliver QoS) *packet {
 	size := len(message)
 	if deliver != AtMostOnce {
 		size += 2 // packet ID
 	}
 	size += 2 + len(topic)
 
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], pubReq<<4|byte(deliver)<<1)
 	for size > 127 {
 		p.buf = append(p.buf, byte(size|128))
@@ -101,28 +110,38 @@ func (p *packet) pub(id uint, topic string, message []byte, deliver QoS) {
 		p.buf = append(p.buf, byte(id>>8), byte(id))
 	}
 	p.buf = append(p.buf, message...)
+	return p
 }
 
-func (p *packet) pubAck(id uint) {
+func newPubAck(id uint) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], pubAck<<4, 2, byte(id>>8), byte(id))
+	return p
 }
 
-func (p *packet) pubReceived(id uint) {
+func newPubReceived(id uint) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], pubReceived<<4, 2, byte(id>>8), byte(id))
+	return p
 }
 
-func (p *packet) pubRelease(id uint) {
+func newPubRelease(id uint) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], pubRelease<<4, 2, byte(id>>8), byte(id))
+	return p
 }
 
-func (p *packet) pubComplete(id uint) {
+func newPubComplete(id uint) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], pubComplete<<4, 2, byte(id>>8), byte(id))
+	return p
 }
 
 // TODO: batch
-func (p *packet) subReq(id uint, topicFilter string, max QoS) {
+func newSubReq(id uint, topicFilter string, max QoS) *packet {
 	size := 3 + len(topicFilter)
 
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], subReq<<4)
 	for size > 127 {
 		p.buf = append(p.buf, byte(size|128))
@@ -131,17 +150,21 @@ func (p *packet) subReq(id uint, topicFilter string, max QoS) {
 	p.buf = append(p.buf[:0], byte(size))
 	p.addString(topicFilter)
 	p.buf = append(p.buf, byte(max))
+	return p
 }
 
 // TODO: batch
-func (p *packet) subAck(id uint, returnCode byte) {
+func newSubAck(id uint, returnCode byte) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], subAck<<4, 3, byte(id>>8), byte(id), returnCode)
+	return p
 }
 
 // TODO: batch
-func (p *packet) unsubReq(id uint, topicFilter string) {
+func newUnsubReq(id uint, topicFilter string) *packet {
 	size := 2 + len(topicFilter)
 
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], unsubReq<<4)
 	for size > 127 {
 		p.buf = append(p.buf, byte(size|128))
@@ -150,11 +173,14 @@ func (p *packet) unsubReq(id uint, topicFilter string) {
 	p.buf = append(p.buf[:0], byte(size))
 	p.buf = append(p.buf, byte(id>>8), byte(id))
 	p.addString(topicFilter)
+	return p
 }
 
 // TODO: batch
-func (p *packet) unsubAck(id uint) {
+func newUnsubAck(id uint) *packet {
+	p := packetPool.Get().(*packet)
 	p.buf = append(p.buf[:0], unsubAck<<4, 2, byte(id>>8), byte(id))
+	return p
 }
 
 // PacketIDs is a 16-bit address space register.
