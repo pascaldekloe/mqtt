@@ -75,6 +75,9 @@ type Client struct {
 
 	conn net.Conn
 
+	respQ chan *packet // high-prority send queue
+	keyQ  chan uint    // storage send queue
+
 	listener Receive
 
 	pong   chan struct{}
@@ -232,43 +235,67 @@ func (c *Client) readLoop() {
 
 func (c *Client) inbound(a byte, p []byte) (ok bool) {
 	switch packetType := a >> 4; packetType {
-	case pubReq:
+	case pubMsg:
 		// parse packet
 		i := uint(p[0])<<8 | uint(p[1])
 		topic := string(p[2:i])
-		id := uint(p[i])<<8 | uint(p[i+1])
+		packetID := uint(p[i])<<8 | uint(p[i+1])
 		message := p[i+2:]
 
-		var resp *packet
-		switch (a >> 1) & 3 {
-		case AtMostOnce:
+		switch a & 0b110 {
+		case AtMostOnce << 1:
 			c.listener(topic, message)
-			return
 
-		case AtLeastOnce:
-			resp = newPubAck(id)
+		case AtLeastOnce << 1:
+			if c.listener(topic, message) {
+				c.respQ <- newPubAck(packetID)
+			}
 
-		case ExactlyOnce:
-			resp = newPubReceived(id)
+		case ExactlyOnce << 1:
+			bytes := make([]byte, len(topic)+1+len(message))
+			copy(bytes, topic)
+			copy(bytes[len(topic)+1:], message)
+			err := c.Storage.Persist(packetID, bytes)
+			if err != nil {
+				log.Print("mqtt: reception persistence malfuncion: ", err)
+				return
+			}
+			c.respQ <- newPubReceived(packetID)
 
-		case reservedQoS3:
+		case reservedQoS3 << 1:
 			log.Print("mqtt: close on protocol violation: publish request with reserved QoS 3")
 			c.conn.Close()
 			return
 		}
 
-		err := c.Storage.Persist(id, message)
+	case pubRelease: // second round trip for ExactlyOnce reception
+		if len(p) != 2 {
+			log.Print("mqtt: close on protocol violation: received packet type ", packetType, " with remaining length ", len(p))
+			c.conn.Close()
+			return
+		}
+		packetID := uint(binary.BigEndian.Uint16(p))
+		bytes, err := c.Storage.Retreive(packetID)
 		if err != nil {
 			log.Print("mqtt: reception persistence malfuncion: ", err)
 			return
 		}
-		if err := c.write(resp.buf); err != nil {
-			log.Print("mqtt: submission publish reception failed on fatal network error: ", err)
-			return
+		if bytes != nil {
+			for i, b := range bytes {
+				if b == 0 {
+					topic := string(bytes[:i])
+					message := bytes[i+1:]
+					if !c.listener(topic, message) {
+						return
+					}
+					break
+				}
+			}
+			c.Storage.Delete(packetID)
 		}
-		return
+		c.respQ <- newPubComplete(packetID)
 
-	case pubReceived, pubRelease, pubComplete, pubAck, unsubAck:
+	case pubReceived, pubComplete, pubAck, unsubAck:
 		if len(p) != 2 {
 			log.Print("mqtt: close on protocol violation: received packet type ", packetType, " with remaining length ", len(p))
 			c.conn.Close()
@@ -282,9 +309,7 @@ func (c *Client) inbound(a byte, p []byte) (ok bool) {
 				return
 			}
 
-			if err := c.write(newPubComplete(id).buf); err != nil {
-				log.Print("mqtt: submission publish complete failed on fatal network error: ", err)
-			}
+			c.respQ <- newPubComplete(id)
 		} else {
 			c.Storage.Delete(id)
 		}
@@ -386,28 +411,42 @@ func (c *Client) connect() error {
 //
 // Multiple goroutines may invoke Publish simultaneously.
 func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
-	id, err := c.packetIDs.reserve()
-	if err != nil {
-		return err
-	}
-
-	packet := newPub(id, topic, message, deliver)
-
-	return c.Storage.Persist(id|localPacketIDFlag, packet.buf)
+	return c.publish(topic, message, deliver, false)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
 // server, so that they can be delivered to future subscribers.
 func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
+	return c.publish(topic, message, deliver, true)
+}
+
+func (c *Client) publish(topic string, message []byte, deliver QoS, retain bool) error {
+	if deliver == AtMostOnce {
+		packet := newPubMsg(topic, message)
+		defer packetPool.Put(packet)
+		if retain {
+			packet.buf[0] |= retainFlag
+		}
+		return c.write(packet.buf)
+	}
+
 	id, err := c.packetIDs.reserve()
 	if err != nil {
 		return err
 	}
+	packet := newPubMsgWithID(id, topic, message, deliver)
+	defer packetPool.Put(packet)
+	if retain {
+		packet.buf[0] |= retainFlag
+	}
 
-	packet := newPub(id, topic, message, deliver)
-	packet.buf[0] |= retainFlag
-
-	return c.Storage.Persist(id|localPacketIDFlag, packet.buf)
+	key := id | localPacketIDFlag
+	err = c.Storage.Persist(key, packet.buf)
+	if err != nil {
+		return err
+	}
+	c.keyQ <- key
+	return nil
 }
 
 // Subscribe requests a subscription for all topics that match the filter.

@@ -91,24 +91,35 @@ func newConnAck(code connectReturn, sessionPresent bool) *packet {
 	return p
 }
 
-func newPub(id uint, topic string, message []byte, deliver QoS) *packet {
-	size := len(message)
-	if deliver != AtMostOnce {
-		size += 2 // packet ID
-	}
-	size += 2 + len(topic)
-
+func newPubMsg(topic string, message []byte) *packet {
 	p := packetPool.Get().(*packet)
-	p.buf = append(p.buf[:0], pubReq<<4|byte(deliver)<<1)
+	p.buf = append(p.buf[:0], pubMsg<<4)
+
+	size := 2 + len(topic) + len(message)
 	for size > 127 {
 		p.buf = append(p.buf, byte(size|128))
 		size >>= 7
 	}
-	p.buf = append(p.buf[:0], byte(size))
+	p.buf = append(p.buf, byte(size))
+
 	p.addString(topic)
-	if deliver != AtMostOnce {
-		p.buf = append(p.buf, byte(id>>8), byte(id))
+	p.buf = append(p.buf, message...)
+	return p
+}
+
+func newPubMsgWithID(id uint, topic string, message []byte, deliver QoS) *packet {
+	p := packetPool.Get().(*packet)
+	p.buf = append(p.buf[:0], pubMsg<<4|byte(deliver)<<1)
+
+	size := 4 + len(topic) + len(message)
+	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
+		size >>= 7
 	}
+	p.buf = append(p.buf, byte(size))
+
+	p.addString(topic)
+	p.buf = append(p.buf, byte(id>>8), byte(id))
 	p.buf = append(p.buf, message...)
 	return p
 }

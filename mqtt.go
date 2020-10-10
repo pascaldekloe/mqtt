@@ -38,7 +38,7 @@ const (
 const (
 	connReq = iota + 1
 	connAck
-	pubReq
+	pubMsg
 	pubAck      // QoS 1 confirm
 	pubReceived // QoS 2 confirm, part Ⅰ
 	pubRelease  // QoS 2 confirm, part Ⅱ
