@@ -1,13 +1,13 @@
 package mqtt
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/bits"
 	"net"
 	"time"
 )
@@ -57,8 +57,8 @@ type ClientConfig struct {
 	// Negative values default to the protocol limit of 64 ki.
 	RequestLimit int
 
-	// Maximum number of bytes for inbound payloads.
-	// Negative values default to the protocol limit of 256 MiB.
+	// Messages larger than InSizeLimit are not presented to Receive.
+	// The protocol limit is 256 MiB.
 	InSizeLimit int
 
 	// Backoff on transport errors.
@@ -104,6 +104,8 @@ func NewClient(config *ClientConfig) *Client {
 		c.packetIDs.limit = requestMax
 	}
 
+	go c.readRoutine()
+
 	return c
 }
 
@@ -124,7 +126,7 @@ func (c *Client) write(p []byte) error {
 		}
 
 		delay := c.RetryDelay
-		log.Print("mqtt: send retry in ", delay, " on temporary network error: ", err)
+		log.Print("mqtt: read retry in ", delay, " on ", err)
 		time.Sleep(delay)
 		c.conn.SetWriteDeadline(time.Now().Add(c.WireTimeout))
 
@@ -137,110 +139,159 @@ func (c *Client) write(p []byte) error {
 	return nil
 }
 
-// ErrProtoReset signals illegal reception from the server.
-var errProtoReset = errors.New("mqtt: connection reset on protocol violation")
-
-func (c *Client) readLoop() {
+func (c *Client) readRoutine() {
 	// determine only here whether closed
 	defer close(c.closed)
 
 	for {
 		c.reconnect()
-		err := c.read()
-		if errors.Is(err, ErrClosed) {
-			return
+		r := bufio.NewReaderSize(c.conn, 2048)
+		for {
+			err := c.nextPacket(r)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, ErrClosed) {
+				return
+			}
+			log.Print(err)
+			break
 		}
-		log.Print(err)
 	}
 }
 
-var errRemainingLength = fmt.Errorf("%w: remaining length declaration exceeds 4 B", errProtoReset)
+// ErrProtoReset signals illegal reception from the server.
+var errProtoReset = errors.New("mqtt: connection reset on protocol violation")
 
-func (c *Client) read() error {
-	buf := make([]byte, 128)
-	var bufN, flushN int
+func (c *Client) nextPacket(r *bufio.Reader) error {
+	firstByte, err := c.readByte(r)
+	if err != nil {
+		return err
+	}
+	l, err := c.readRemainingLength(r)
+	if err != nil {
+		return err
+	}
+
+	if l > c.InSizeLimit {
+		// BUG(pascaldekloe):
+		// “The Client MUST acknowledge any Publish Packet it receives
+		// according to the applicable QoS rules regardless of whether
+		// it elects to process the Application Message that it
+		// contains [MQTT-4.5.0-2].”
+		log.Printf("mqtt: skipping %d B inbound packet content; limit is %d B", l, c.InSizeLimit)
+		_, err := r.Discard(l)
+		return unexpectEOF(err)
+	}
+
+	p, didPeek, err := c.peekOrReadN(r, l)
+
+	err = c.inbound(firstByte, p)
+	if err != nil {
+		return err
+	}
+
+	if didPeek {
+		r.Discard(len(p)) // no errors guaranteed
+	}
+	return nil
+}
+
+func (c *Client) readRemainingLength(r *bufio.Reader) (int, error) {
+	var l, shift uint
+	for i := 0; i < 4; i++ {
+		b, err := c.readByte(r)
+		if err != nil {
+			return 0, unexpectEOF(err)
+		}
+		l |= (b & 127) << shift
+		if b < 0x80 {
+			return int(l), nil
+		}
+		shift += 7
+	}
+	return 0, fmt.Errorf("%w: remaining length declaration exceeds 4 B", errProtoReset)
+}
+
+func (c *Client) readByte(r *bufio.Reader) (uint, error) {
 	for {
-		read, err := c.conn.Read(buf[bufN:])
-		bufN += read
-		// Error handling delayed! Consume available first.
+		b, err := r.ReadByte()
 
-		var offset int
-		if flushN > 0 {
-			if flushN >= bufN {
-				flushN -= bufN
-				bufN = 0
-			} else {
-				offset = flushN
-			}
+		var ne net.Error
+		switch {
+		case err == nil:
+			return uint(b), nil
+		case errors.As(err, &ne) && ne.Temporary():
+			delay := c.RetryDelay
+			log.Print("mqtt: read retry in ", delay, " on ", err)
+			time.Sleep(delay)
+		default:
+			return 0, err
+		}
+	}
+}
+
+func (c *Client) readN(r *bufio.Reader, n int) ([]byte, error) {
+	p := make([]byte, n)
+	i, err := r.Read(p)
+	for i < n {
+		var ne net.Error
+		switch {
+		case err == nil:
+			break // incomplete read
+		case errors.As(err, &ne) && ne.Temporary():
+			delay := c.RetryDelay
+			log.Print("mqtt: read retry in ", delay, " on ", err)
+			time.Sleep(delay)
+		default:
+			return nil, err
 		}
 
-		for offset+1 < bufN {
-			sizeVal, sizeN := binary.Uvarint(buf[offset+1 : bufN])
-			if sizeN == 0 {
-				// not enough data
-				if bufN-offset > 4 {
-					return errRemainingLength
-				}
-				break
-			}
-			if sizeN < 0 || sizeN > 4 {
-				return errRemainingLength
-			}
-
-			// won't overflow due to 4 byte varint limit
-			packetSize := 1 + sizeN + int(sizeVal)
-			if packetSize > c.InSizeLimit {
-				log.Printf("mqtt: skipping %d B inbound packet; limit is %d B", packetSize, c.InSizeLimit)
-				flushN = packetSize
-				break
-			}
-
-			if packetSize < bufN-offset {
-				// not enough data
-				if packetSize > len(buf) {
-					// buff too small
-					grow := make([]byte, 1<<uint(bits.Len(uint(packetSize))))
-					copy(grow, buf[:bufN])
-					buf = grow
-				}
-				break
-			}
-
-			err := c.inbound(buf[offset], buf[offset+1+sizeN:offset+packetSize])
-			if err != nil {
-				return err
-			}
-
-			offset += packetSize
+		var more int
+		more, err = r.Read(p[i:])
+		if err != nil && i != 0 {
+			err = unexpectEOF(err)
 		}
+		i += more
+	}
+	return p, err
+}
 
-		if offset > 0 {
-			// move to beginning of buffer
-			copy(buf, buf[offset:bufN])
-			bufN -= offset
-		}
+func (c *Client) peekOrReadN(r *bufio.Reader, n int) (p []byte, didPeek bool, err error) {
+	for {
+		p, err = r.Peek(n)
 
-		switch err {
-		case nil:
-			break
+		var ne net.Error
+		switch {
+		case err == nil:
+			didPeek = true
+			return
 
-		case io.EOF:
-			return err
+		case errors.Is(err, bufio.ErrBufferFull):
+			// n does not fit in read buffer
+			p, err = c.readN(r, n)
+			return
+
+		case errors.As(err, &ne) && ne.Temporary():
+			delay := c.RetryDelay
+			log.Print("mqtt: read retry in ", delay, " on ", err)
+			time.Sleep(delay)
 
 		default:
-			if e, ok := err.(net.Error); !ok || !e.Temporary() {
-				return err
-			}
-
-			delay := c.RetryDelay
-			log.Print("mqtt: read retry on temporary network error in ", delay, ": ", err)
-			time.Sleep(delay)
+			return
 		}
 	}
 }
 
-func (c *Client) inbound(a byte, p []byte) error {
-	switch packetType := a >> 4; packetType {
+func unexpectEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
+}
+
+func (c *Client) inbound(firstByte uint, p []byte) error {
+	switch packetType := firstByte >> 4; packetType {
 	case pubMsg:
 		// parse packet
 		i := uint(p[0])<<8 | uint(p[1])
@@ -248,7 +299,7 @@ func (c *Client) inbound(a byte, p []byte) error {
 		packetID := uint(p[i])<<8 | uint(p[i+1])
 		message := p[i+2:]
 
-		switch a & 0b110 {
+		switch firstByte & 0b110 {
 		case AtMostOnce << 1:
 			c.listener(topic, message)
 
