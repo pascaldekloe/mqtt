@@ -63,9 +63,6 @@ type ClientConfig struct {
 
 	// Backoff on transport errors.
 	RetryDelay time.Duration
-
-	// Limit for transport unit exchange.
-	WireTimeout time.Duration
 }
 
 // Client manages a single network connection.
@@ -110,7 +107,6 @@ func NewClient(config *ClientConfig) *Client {
 }
 
 func (c *Client) write(p []byte) error {
-	c.conn.SetWriteDeadline(time.Now().Add(c.WireTimeout))
 	n, err := c.conn.Write(p)
 	for err != nil {
 		select {
@@ -120,15 +116,15 @@ func (c *Client) write(p []byte) error {
 			break
 		}
 
-		if e, ok := err.(net.Error); !ok || !e.Temporary() {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Temporary() {
 			c.conn.Close()
 			return err
 		}
 
 		delay := c.RetryDelay
-		log.Print("mqtt: read retry in ", delay, " on ", err)
+		log.Print("mqtt: write retry in ", delay, " on ", err)
 		time.Sleep(delay)
-		c.conn.SetWriteDeadline(time.Now().Add(c.WireTimeout))
 
 		var more int
 		more, err = c.conn.Write(p[n:])
@@ -401,8 +397,6 @@ func (c *Client) reconnect() error {
 		return err
 	}
 	c.conn = conn
-
-	c.conn.SetDeadline(time.Now().Add(c.WireTimeout))
 
 	// launch handshake
 	if err := c.write(newConnReq(&c.SessionConfig).buf); err != nil {
