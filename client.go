@@ -46,12 +46,11 @@ func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Du
 
 // ClientConfig defines Client settings.
 type ClientConfig struct {
-	Connecter // remote target
+	Receive   // inbound destination
+	Connecter // remote link
+	Storage   // persistence safeguard
 
 	SessionConfig
-
-	// Enable AtLeastOnce and ExactlyOnce when set.
-	Storage
 
 	// Boundary for ErrRequestLimit.
 	// Negative values default to the protocol limit of 64 ki.
@@ -75,8 +74,6 @@ type Client struct {
 
 	outQ chan *packet // high-prority send queue
 	keyQ chan uint    // storage send queue
-
-	listener Receive
 
 	closed chan struct{}
 }
@@ -297,10 +294,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 
 		switch firstByte & 0b110 {
 		case AtMostOnce << 1:
-			c.listener(topic, message)
+			c.Receive(topic, message)
 
 		case AtLeastOnce << 1:
-			if c.listener(topic, message) {
+			if c.Receive(topic, message) {
 				c.outQ <- newPubAck(packetID)
 			}
 
@@ -334,7 +331,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 				if b == 0 {
 					topic := string(bytes[:i])
 					message := bytes[i+1:]
-					if !c.listener(topic, message) {
+					if !c.Receive(topic, message) {
 						return nil // don't confirm; keep in storage
 					}
 					break
