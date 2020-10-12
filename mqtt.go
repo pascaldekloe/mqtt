@@ -29,8 +29,8 @@ type QoS uint
 // Quality of Service Levels
 const (
 	AtMostOnce   = iota // fire and forget
-	AtLeastOnce         // network round trip + Storage
-	ExactlyOnce         // two network round trips + Storage
+	AtLeastOnce         // network round trip + Persistence
+	ExactlyOnce         // two network round trips + Persistence
 	reservedQoS3        // must not be used
 )
 
@@ -100,21 +100,20 @@ type Will struct {
 // LocalPacketIDFlag marks the key in the a local address space.
 const localPacketIDFlag = 1 << 16
 
-// Storage abstracts the internal queue persistence.
-//
-// Content is addressed by a 17-bit key, packed in the least significant bits.
-type Storage interface {
+// Persistence abstracts session storage, for continuation inbetween connects.
+// Content is addressed by a 17-bit key (range 0 to 131071).
+type Persistence interface {
 	// Resolves data under the key. Malfunction may cause submission delay.
-	Retreive(key uint) ([]byte, error)
+	Load(key uint) ([]byte, error)
 
 	// Upserts data under the key. Malfunction may cause resubmission with
-	// OnceOrMore or ExactlyOnce deliveries. The Client.Publish operation
+	// OnceOrMore or ExactlyOnce deliveries. The Client Publish operation
 	// fails entirely on Persist errors.
-	Persist(key uint, data []byte) error
+	Store(key uint, data []byte) error
 
 	// Removes data under the key. Malfunction may threaten the availability
 	// of Persist in terms of storage space.
-	Delete(key uint)
+	Delete(key uint) error
 
 	// Enumerates available data. Malfunction may prevent new connection
 	// establishment when an existing session is continued!

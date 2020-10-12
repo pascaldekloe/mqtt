@@ -46,9 +46,9 @@ func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Du
 
 // ClientConfig defines Client settings.
 type ClientConfig struct {
-	Receive   // inbound destination
-	Connecter // remote link
-	Storage   // persistence safeguard
+	Receive     // inbound destination
+	Connecter   // remote link
+	Persistence // sesion safeguard
 
 	SessionConfig
 
@@ -305,7 +305,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			bytes := make([]byte, len(topic)+1+len(message))
 			copy(bytes, topic)
 			copy(bytes[len(topic)+1:], message)
-			err := c.Storage.Persist(packetID, bytes)
+			err := c.Persistence.Store(packetID, bytes)
 			if err != nil {
 				log.Print("mqtt: persistence malfuncion: ", err)
 				return nil // don't confirm
@@ -321,7 +321,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return fmt.Errorf("%w: received publish release with remaining length %d", errProtoReset, len(p))
 		}
 		packetID := uint(binary.BigEndian.Uint16(p))
-		bytes, err := c.Storage.Retreive(packetID)
+		bytes, err := c.Persistence.Load(packetID)
 		if err != nil {
 			log.Print("mqtt: persistence malfuncion: ", err)
 			return nil
@@ -337,7 +337,9 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 					break
 				}
 			}
-			c.Storage.Delete(packetID)
+			if err := c.Persistence.Delete(packetID); err != nil {
+				return err // must confirm and can't without corruption
+			}
 		}
 		c.outQ <- newPubComplete(packetID)
 
@@ -348,14 +350,14 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		id := uint(binary.BigEndian.Uint16(p))
 
 		if packetType == pubReceived {
-			if err := c.Storage.Persist(id, nil); err != nil {
+			if err := c.Persistence.Store(id, nil); err != nil {
 				log.Print("mqtt: persistence malfuncion: ", err)
 				return nil
 			}
 
 			c.outQ <- newPubComplete(id)
 		} else {
-			c.Storage.Delete(id)
+			c.Persistence.Delete(id)
 		}
 
 	case subAck:
@@ -437,7 +439,7 @@ func (c *Client) reconnect() error {
 }
 
 // Publish persists the message (for network submission). Error returns other
-// than ErrTopicName, ErrMessageSize and ErrRequestLimit signal fatal Storage
+// than ErrTopicName, ErrMessageSize and ErrRequestLimit signal fatal storage
 // malfunction. Thus the actual publication is decoupled from the invokation.
 //
 // Deliver AtMostOnce causes message to be send the server, and that'll be the
@@ -477,7 +479,7 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, retain bool)
 	}
 
 	key := id | localPacketIDFlag
-	err = c.Storage.Persist(key, packet.buf)
+	err = c.Persistence.Store(key, packet.buf)
 	if err != nil {
 		return err
 	}
