@@ -2,6 +2,7 @@ package mqtt
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -11,6 +12,41 @@ import (
 	"net"
 	"time"
 )
+
+// Multiple goroutines may invoke methods on a ClientPool simultaneously.
+type ClientPool struct {
+	clients chan *Client
+}
+
+// NewClientPool retuns a new pool with one Client for each configuration.
+func NewClientPool(configs ...*ClientConfig) *ClientPool {
+	pool := ClientPool{make(chan *Client, len(configs))}
+	for _, config := range configs {
+		pool.clients <- NewClient(config)
+	}
+	return &pool
+}
+
+// NewNClientPool returns a new pool with n Clients.
+func NewNClientPool(n int, config *ClientConfig) *ClientPool {
+	pool := ClientPool{make(chan *Client, n)}
+	for i := 0; i < n; i++ {
+		pool.clients <- NewClient(config)
+	}
+	return &pool
+}
+
+// Publish invokes Publish on a Client.
+func (pool *ClientPool) Publish(ctx context.Context, topic string, message []byte, deliver QoS) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case client := <- pool.clients:
+		err := client.Publish(topic, message, deliver)
+		pool.clients <- client
+		return err
+	}
+}
 
 // Receive gets invoked for inbound messages. AtMostOnce ignores the return.
 // ExactlyOnce repeates Receive until the return is true and AtLeastOnce may
@@ -61,6 +97,9 @@ type ClientConfig struct {
 }
 
 // Client manages a single network connection.
+//
+// Multiple goroutines may invoke methods on a Client, but NOT simultaneously.
+// See ClientPool for a safe alternative.
 type Client struct {
 	ClientConfig // read-only
 
