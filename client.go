@@ -48,13 +48,9 @@ func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Du
 type ClientConfig struct {
 	Receive     // inbound destination
 	Connecter   // remote link
-	Persistence // sesion safeguard
+	Persistence // session safeguard
 
 	SessionConfig
-
-	// Boundary for ErrRequestLimit.
-	// Negative values default to the protocol limit of 64 ki.
-	RequestLimit int
 
 	// Messages larger than InSizeLimit are not presented to Receive.
 	// The protocol limit is 256 MiB.
@@ -68,34 +64,26 @@ type ClientConfig struct {
 type Client struct {
 	ClientConfig // read-only
 
-	packetIDs
-
 	conn net.Conn
 
 	outQ chan *packet // high-prority send queue
 	keyQ chan uint    // storage send queue
 
 	closed chan struct{}
+
+	atLeastOnceLine
+	exactlyOnceLine
 }
 
 func NewClient(config *ClientConfig) *Client {
 	c := &Client{
 		ClientConfig: *config, // copy
-		packetIDs: packetIDs{
-			inUse: make(map[uint]struct{}),
-			limit: config.RequestLimit,
-		},
-		closed: make(chan struct{}),
+		closed:       make(chan struct{}),
 	}
 
 	if c.Will != nil {
 		willCopy := *c.Will
 		c.Will = &willCopy
-	}
-
-	const requestMax = 0x10000 // 16-bit address space
-	if c.packetIDs.limit < 1 || c.packetIDs.limit > requestMax {
-		c.packetIDs.limit = requestMax
 	}
 
 	go c.readRoutine()
@@ -155,6 +143,8 @@ func (c *Client) readRoutine() {
 
 // ErrProtoReset signals illegal reception from the server.
 var errProtoReset = errors.New("mqtt: connection reset on protocol violation")
+
+var errPacketID = fmt.Errorf("%w: wrong packet identifier", errProtoReset)
 
 func (c *Client) nextPacket(r *bufio.Reader) error {
 	firstByte, err := c.readByte(r)
@@ -337,45 +327,97 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 					break
 				}
 			}
-			if err := c.Persistence.Delete(packetID); err != nil {
-				return err // must confirm and can't without corruption
-			}
+			c.Persistence.Delete(packetID)
 		}
 		c.outQ <- newPubComplete(packetID)
 
-	case pubReceived, pubComplete, pubAck, unsubAck:
+	case pubAck: // confirm of Publish with AtLeastOnce
 		if len(p) != 2 {
-			return fmt.Errorf("%w: received packet type %d with remaining length %d", errProtoReset, packetType, len(p))
+			return fmt.Errorf("%w: received publish ␆ with remaining length %d", errProtoReset, len(p))
 		}
-		id := uint(binary.BigEndian.Uint16(p))
+		packetID := uint(binary.BigEndian.Uint16(p))
 
-		if packetType == pubReceived {
-			if err := c.Persistence.Store(id, nil); err != nil {
-				log.Print("mqtt: persistence malfuncion: ", err)
-				return nil
-			}
+		err := c.atLeastOnceLine.FreeID(packetID)
+		if err != nil {
+			return err
+		}
 
-			c.outQ <- newPubComplete(id)
-		} else {
-			c.Persistence.Delete(id)
+		err = c.Persistence.Delete(packetID)
+		if err != nil {
+			return err
+		}
+
+	case pubReceived: // first confirm of Publish with ExactlyOnce
+		if len(p) != 2 {
+			return fmt.Errorf("%w: received publish received with remaining length %d", errProtoReset, len(p))
+		}
+		packetID := uint(binary.BigEndian.Uint16(p))
+
+		err := c.exactlyOnceLine.ReleaseID(packetID)
+		if err != nil {
+			return err
+		}
+
+		packet := newPubRelease(packetID)
+		err = c.Persistence.Store(packetID, packet.buf)
+		if err != nil {
+			return err
+		}
+		c.outQ <- packet
+
+	case pubComplete: // second confirm of Publish with ExactlyOnce
+		if len(p) != 2 {
+			return fmt.Errorf("%w: received publish complete with remaining length %d", errProtoReset, len(p))
+		}
+		packetID := uint(binary.BigEndian.Uint16(p))
+
+		err := c.exactlyOnceLine.FreeID(packetID)
+		if err != nil {
+			return err
+		}
+		err = c.Persistence.Delete(packetID)
+		if err != nil {
+			return err
 		}
 
 	case subAck:
 		if len(p) != 3 {
-			return fmt.Errorf("%w: received subscribe acknowledge with remaining length %d", errProtoReset, len(p))
+			return fmt.Errorf("%w: received subscribe ␆ with remaining length %d", errProtoReset, len(p))
+		}
+		packetID := uint(binary.BigEndian.Uint16(p))
+		if packetID != subscriptionPacketID {
+			return fmt.Errorf("%w: received subscribe ␆ %#04x", errPacketID, packetID)
+		}
+
+		err := c.Persistence.Delete(packetID)
+		if err != nil {
+			return err
+		}
+
+	case unsubAck:
+		if len(p) != 2 {
+			return fmt.Errorf("%w: received packet type %d with remaining length %d", errProtoReset, packetType, len(p))
+		}
+		packetID := uint(binary.BigEndian.Uint16(p))
+		if packetID != subscriptionPacketID {
+			return fmt.Errorf("%w: received unsubscribe ␆ %#04x", errPacketID, packetID)
+		}
+
+		err := c.Persistence.Delete(packetID)
+		if err != nil {
+			return err
 		}
 
 	case pong:
 		if len(p) != 0 {
 			return fmt.Errorf("%w: received ping request with remaining length %d", errProtoReset, len(p))
 		}
-		c.outQ <- pongPacket
 
 	case connReq, subReq, unsubReq, ping, disconn:
 		return fmt.Errorf("%w: received packet type %d", errProtoReset, packetType)
 
 	case connAck:
-		return fmt.Errorf("%w: received redundant connection acknowledge", errProtoReset)
+		return fmt.Errorf("%w: received redundant connection ␆", errProtoReset)
 
 	default:
 		return fmt.Errorf("%w: received reserved packet type %d", errProtoReset, packetType)
@@ -413,10 +455,10 @@ func (c *Client) reconnect() error {
 			return fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
 		}
 		if n > 1 && buf[1] != 2 {
-			return fmt.Errorf("mqtt: connect acknowledge remaining length is %d instead of 2—connection closed", buf[1])
+			return fmt.Errorf("mqtt: connect ␆ remaining length is %d instead of 2—connection closed", buf[1])
 		}
 		if n > 2 && buf[2] > 1 {
-			return fmt.Errorf("mqtt: received reserved connect acknowledge flags %#x—connection closed", buf[2])
+			return fmt.Errorf("mqtt: received reserved connect ␆ flags %#x—connection closed", buf[2])
 		}
 		if n > 3 {
 			break
@@ -449,37 +491,38 @@ func (c *Client) reconnect() error {
 //
 // Multiple goroutines may invoke Publish simultaneously.
 func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
-	return c.publish(topic, message, deliver, false)
+	return c.publish(topic, message, deliver, 0)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
 // server, so that they can be delivered to future subscribers.
 func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
-	return c.publish(topic, message, deliver, true)
+	return c.publish(topic, message, deliver, retainFlag)
 }
 
-func (c *Client) publish(topic string, message []byte, deliver QoS, retain bool) error {
-	if deliver == AtMostOnce {
+func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) error {
+	var packetID uint
+
+	switch deliver {
+	case AtMostOnce:
 		packet := newPubMsg(topic, message)
 		defer packetPool.Put(packet)
-		if retain {
-			packet.buf[0] |= retainFlag
-		}
+		packet.buf[0] |= flags
 		return c.write(packet.buf)
+
+	case AtLeastOnce:
+		packetID = c.atLeastOnceLine.AssignID()
+
+	case ExactlyOnce:
+		packetID = c.exactlyOnceLine.AssignID()
 	}
 
-	id, err := c.packetIDs.reserve()
-	if err != nil {
-		return err
-	}
-	packet := newPubMsgWithID(id, topic, message, deliver)
+	packet := newPubMsgWithID(packetID, topic, message, deliver)
 	defer packetPool.Put(packet)
-	if retain {
-		packet.buf[0] |= retainFlag
-	}
+	packet.buf[0] |= flags
 
-	key := id | localPacketIDFlag
-	err = c.Persistence.Store(key, packet.buf)
+	key := packetID | localPacketIDFlag
+	err := c.Persistence.Store(key, packet.buf)
 	if err != nil {
 		return err
 	}
@@ -490,28 +533,32 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, retain bool)
 // Subscribe requests a subscription for all topics that match the filter.
 // The requested quality of service is a maximum for the server.
 func (c *Client) Subscribe(topicFilter string, max QoS) error {
-	id, err := c.packetIDs.reserve()
-	if err != nil {
-		return err
-	}
+	packet := newSubReq(subscriptionPacketID, topicFilter, max)
+	defer packetPool.Put(packet)
 
-	if err := c.write(newSubReq(id, topicFilter, max).buf); err != nil {
+	key := uint(subscriptionPacketID | localPacketIDFlag)
+	err := c.Persistence.Store(key, packet.buf)
+	if err != nil {
+		// TODO(pascaldekloe): Trigger reset
 		return err
 	}
+	c.keyQ <- key
 
 	panic("TODO: await ack")
 }
 
 // Unsubscribe requests a Subscribe cancelation.
 func (c *Client) Unsubscribe(topicFilter string) error {
-	id, err := c.packetIDs.reserve()
-	if err != nil {
-		return err
-	}
+	packet := newUnsubReq(subscriptionPacketID, topicFilter)
+	defer packetPool.Put(packet)
 
-	if err := c.write(newUnsubReq(id, topicFilter).buf); err != nil {
+	key := uint(subscriptionPacketID | localPacketIDFlag)
+	err := c.Persistence.Store(key, packet.buf)
+	if err != nil {
+		// TODO(pascaldekloe): Trigger reset
 		return err
 	}
+	c.keyQ <- key
 
 	panic("TODO: await ack")
 }
