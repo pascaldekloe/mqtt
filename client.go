@@ -296,7 +296,9 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 
 		case AtLeastOnce << 1:
 			if c.Receive(topic, message) {
-				c.outQ <- newPubAck(packetID)
+				p := packetPool.Get().(*packet)
+				p.buf = append(p.buf[:0], pubAck<<4, 2, byte(packetID>>8), byte(packetID))
+				c.outQ <- p
 			}
 
 		case ExactlyOnce << 1:
@@ -308,7 +310,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 				log.Print("mqtt: persistence malfuncion: ", err)
 				return nil // don't confirm
 			}
-			c.outQ <- newPubReceived(packetID)
+
+			p := packetPool.Get().(*packet)
+			p.buf = append(p.buf[:0], pubReceived<<4, 2, byte(packetID>>8), byte(packetID))
+			c.outQ <- p
 
 		default:
 			return fmt.Errorf("%w: received publish with reserved QoS", errProtoReset)
@@ -337,7 +342,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			}
 			c.Persistence.Delete(packetID)
 		}
-		c.outQ <- newPubComplete(packetID)
+
+		p := packetPool.Get().(*packet)
+		p.buf = append(p.buf[:0], pubComplete<<4, 2, byte(packetID>>8), byte(packetID))
+		c.outQ <- p
 
 	case pubAck: // confirm of Publish with AtLeastOnce
 		if len(p) != 2 {
@@ -366,12 +374,13 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return err
 		}
 
-		packet := newPubRelease(packetID)
-		err = c.Persistence.Store(packetID, packet.buf)
+		p := packetPool.Get().(*packet)
+		p.buf = append(p.buf[:0], pubRelease<<4, 2, byte(packetID>>8), byte(packetID))
+		err = c.Persistence.Store(packetID, p.buf)
 		if err != nil {
 			return err
 		}
-		c.outQ <- packet
+		c.outQ <- p
 
 	case pubComplete: // second confirm of Publish with ExactlyOnce
 		if len(p) != 2 {
@@ -478,7 +487,57 @@ func (c *Client) reconnect() error {
 	c.conn = conn
 
 	// launch handshake
-	if err := c.write(newConnReq(&c.SessionConfig).buf); err != nil {
+	size := 6 // variable header
+
+	var flags uint
+	if c.UserName != "" {
+		size += 2 + len(c.UserName)
+		flags |= 1 << 7
+	}
+	if c.Password != nil {
+		size += 2 + len(c.Password)
+		flags |= 1 << 6
+	}
+	if w := c.Will; w != nil {
+		size += 2 + len(w.Topic)
+		size += 2 + len(w.Message)
+		if w.Retain {
+			flags |= 1 << 5
+		}
+		flags |= uint(w.Deliver) << 3
+		flags |= 1 << 2
+	}
+	if c.CleanSession {
+		flags |= 1 << 1
+	}
+	size += 2 + len(c.ClientID)
+
+	p := packetPool.Get().(*packet)
+
+	// compose header
+	p.buf = append(p.buf[:0], connReq<<4)
+	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
+		size >>= 7
+	}
+	p.buf = append(p.buf[:0], byte(size))
+
+	p.buf = append(p.buf, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
+
+	// append payload
+	p.addString(c.ClientID)
+	if w := c.Will; w != nil {
+		p.addString(w.Topic)
+		p.addBytes(w.Message)
+	}
+	if c.UserName != "" {
+		p.addString(c.UserName)
+	}
+	if c.Password != nil {
+		p.addBytes(c.Password)
+	}
+
+	if err := c.write(p.buf); err != nil {
 		return err
 	}
 
@@ -543,10 +602,21 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 
 	switch deliver {
 	case AtMostOnce:
-		packet := newPubMsg(topic, message)
-		defer packetPool.Put(packet)
-		packet.buf[0] |= flags
-		return c.write(packet.buf)
+		p := packetPool.Get().(*packet)
+		defer packetPool.Put(p)
+		p.buf = append(p.buf[:0], pubMsg<<4|flags)
+
+		size := 2 + len(topic) + len(message)
+		for size > 127 {
+			p.buf = append(p.buf, byte(size|128))
+			size >>= 7
+		}
+		p.buf = append(p.buf, byte(size))
+
+		p.addString(topic)
+		p.buf = append(p.buf, message...)
+
+		return c.write(p.buf)
 
 	case AtLeastOnce:
 		packetID = c.atLeastOnceLine.AssignID()
@@ -555,12 +625,23 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 		packetID = c.exactlyOnceLine.AssignID()
 	}
 
-	packet := newPubMsgWithID(packetID, topic, message, deliver)
-	defer packetPool.Put(packet)
-	packet.buf[0] |= flags
+	p := packetPool.Get().(*packet)
+	defer packetPool.Put(p)
+	p.buf = append(p.buf[:0], pubMsg<<4|byte(deliver)<<1|flags)
+
+	size := 4 + len(topic) + len(message)
+	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
+		size >>= 7
+	}
+	p.buf = append(p.buf, byte(size))
+
+	p.addString(topic)
+	p.buf = append(p.buf, byte(packetID>>8), byte(packetID))
+	p.buf = append(p.buf, message...)
 
 	key := packetID | localPacketIDFlag
-	err := c.Persistence.Store(key, packet.buf)
+	err := c.Persistence.Store(key, p.buf)
 	if err != nil {
 		return err
 	}

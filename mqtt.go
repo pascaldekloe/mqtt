@@ -7,7 +7,32 @@ package mqtt
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
+
+// Packet is an encoding buffer.
+type packet struct {
+	buf []byte
+}
+
+func (p *packet) addString(s string) {
+	p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
+	p.buf = append(p.buf, s...)
+}
+
+func (p *packet) addBytes(b []byte) {
+	p.buf = append(p.buf, byte(len(b)>>8), byte(len(b)))
+	p.buf = append(p.buf, b...)
+}
+
+// Fixed Packets
+var (
+	pingPacket    = &packet{[]byte{ping << 4, 0}}
+	pongPacket    = &packet{[]byte{pong << 4, 0}}
+	disconnPacket = &packet{[]byte{disconn << 4, 0}}
+)
+
+var packetPool = sync.Pool{New: func() interface{} { return new(packet) }}
 
 const (
 	packetMax = 268_435_455 // 4-byte varint
