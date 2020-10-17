@@ -71,14 +71,22 @@ type Client struct {
 
 	closed chan struct{}
 
+	// Semaphore allows for one ping request at a time.
+	pingAck chan chan<- struct{}
+
+	// Semaphore allows for one subscribe or unsubscribe request at a time.
+	subscriptionAck chan chan<- byte
+
 	atLeastOnceLine
 	exactlyOnceLine
 }
 
 func NewClient(config *ClientConfig) *Client {
 	c := &Client{
-		ClientConfig: *config, // copy
-		closed:       make(chan struct{}),
+		ClientConfig:    *config, // copy
+		pingAck:         make(chan chan<- struct{}, 1),
+		subscriptionAck: make(chan chan<- byte, 1),
+		closed:          make(chan struct{}),
 	}
 
 	if c.Will != nil {
@@ -381,36 +389,66 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		}
 
 	case subAck:
-		if len(p) != 3 {
-			return fmt.Errorf("%w: received subscribe ␆ with remaining length %d", errProtoReset, len(p))
+		if len(p) < 3 {
+			return fmt.Errorf("%w: subscribe ␆ with %d B remaining length", errProtoReset, len(p))
 		}
-		packetID := uint(binary.BigEndian.Uint16(p))
-		if packetID != subscriptionPacketID {
-			return fmt.Errorf("%w: received subscribe ␆ %#04x", errPacketID, packetID)
+		if packetID := binary.BigEndian.Uint16(p); packetID != subscriptionPacketID {
+			return fmt.Errorf("%w: received subscribe ␆ %#04x, while one %#04x in use", errPacketID, packetID, subscriptionPacketID)
 		}
 
-		err := c.Persistence.Delete(packetID)
+		err := c.Persistence.Delete(subscriptionPacketID)
 		if err != nil {
 			return err
+		}
+
+		var ack chan<- byte
+		select {
+		case ack = <-c.subscriptionAck:
+			defer close(ack)
+		default:
+			return nil // tolerate redundant ␆
+		}
+		for _, returnCode := range p[2:] {
+			select {
+			case ack <- returnCode:
+				break // OK
+			default:
+				// This could happen on persistence failure when
+				// a redundant ␆ is received before the unlock.
+				return nil
+			}
 		}
 
 	case unsubAck:
 		if len(p) != 2 {
-			return fmt.Errorf("%w: received packet type %d with remaining length %d", errProtoReset, packetType, len(p))
+			return fmt.Errorf("%w: unsubscribe ␆ with %d B remaining length", errProtoReset, len(p))
 		}
-		packetID := uint(binary.BigEndian.Uint16(p))
-		if packetID != subscriptionPacketID {
-			return fmt.Errorf("%w: received unsubscribe ␆ %#04x", errPacketID, packetID)
+		if packetID := binary.BigEndian.Uint16(p); packetID != subscriptionPacketID {
+			return fmt.Errorf("%w: received unsubscribe ␆ %#04x, while one %#04x in use", errPacketID, packetID, subscriptionPacketID)
 		}
 
-		err := c.Persistence.Delete(packetID)
+		err := c.Persistence.Delete(subscriptionPacketID)
 		if err != nil {
 			return err
 		}
 
+		var ack chan<- byte
+		select {
+		case ack = <-c.subscriptionAck:
+			close(ack)
+		default:
+			break // tolerate redundant ␆
+		}
+
 	case pong:
 		if len(p) != 0 {
-			return fmt.Errorf("%w: received ping request with remaining length %d", errProtoReset, len(p))
+			return fmt.Errorf("%w: got ping response with %d byte remaining length", errProtoReset, len(p))
+		}
+		select {
+		case ack := <-c.pingAck:
+			close(ack)
+		default:
+			break // tolerate unsolicited ping response
 		}
 
 	case connReq, subReq, unsubReq, ping, disconn:
@@ -530,44 +568,150 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 	return nil
 }
 
-// Subscribe requests a subscription for all topics that match the filter.
+// Subscribe requests a subscription for all topics that match any of the filters.
 // The requested quality of service is a maximum for the server.
-func (c *Client) Subscribe(topicFilter string, max QoS) error {
-	packet := newSubReq(subscriptionPacketID, topicFilter, max)
-	defer packetPool.Put(packet)
+func (c *Client) Subscribe(min, max QoS, topicFilters ...string) error {
+	if len(topicFilters) == 0 {
+		return nil
+	}
 
-	key := uint(subscriptionPacketID | localPacketIDFlag)
-	err := c.Persistence.Store(key, packet.buf)
+	// measure & validate
+	size := 2 + len(topicFilters)*3
+	for _, s := range topicFilters {
+		if err := stringCheck(s); err != nil {
+			return err
+		}
+		size += len(s)
+	}
+	if size > packetMax {
+		return errPacketMax
+	}
+
+	p := packetPool.Get().(*packet)
+	defer packetPool.Put(p)
+	if cap(p.buf) < size+5 {
+		p.buf = make([]byte, 0, size)
+	}
+
+	p.buf = append(p.buf[:0], subReq<<4)
+	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
+		size >>= 7
+	}
+	p.buf = append(p.buf, byte(size), 0, 1) // including subscriptionPacketID
+	for _, s := range topicFilters {
+		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
+		p.buf = append(p.buf, s...)
+		p.buf = append(p.buf, byte(max))
+	}
+
+	returnCodes := make(chan byte, len(topicFilters))
+	c.subscriptionAck <- returnCodes // lock
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), p.buf)
 	if err != nil {
-		// TODO(pascaldekloe): Trigger reset
+		<-c.subscriptionAck // unlock
 		return err
 	}
-	c.keyQ <- key
+	if err := c.write(p.buf); err != nil {
+		panic("TODO(pascaldekloe): Trigger reset")
+	}
 
-	panic("TODO: await ack")
+	var illegalCode bool
+	var tooLows, failures []int
+	var i int
+	for code := range returnCodes {
+		switch code {
+		case AtMostOnce, AtLeastOnce, ExactlyOnce:
+			if QoS(code) < min {
+				tooLows = append(tooLows, i)
+			}
+		case 0x80:
+			failures = append(failures, i)
+		default:
+			illegalCode = true
+		}
+		i++
+	}
+	if illegalCode {
+		panic("TODO(pascaldekloe): Trigger reset")
+	}
+	if i > len(topicFilters) {
+		return fmt.Errorf("mqtt: subscription ␆ got %d return codes for %d topic filters", i, len(topicFilters))
+	}
+	if len(failures) != 0 {
+		return fmt.Errorf("mqtt: subscription ␆ got return code failure for topic filters %d", failures)
+	}
+	if len(tooLows) != 0 {
+		return fmt.Errorf("mqtt: subscription ␆ QoS level lower than minimum for topic filters %d", tooLows)
+	}
+	return nil
 }
 
 // Unsubscribe requests a Subscribe cancelation.
-func (c *Client) Unsubscribe(topicFilter string) error {
-	packet := newUnsubReq(subscriptionPacketID, topicFilter)
-	defer packetPool.Put(packet)
+func (c *Client) Unsubscribe(topicFilters ...string) error {
+	if len(topicFilters) == 0 {
+		return nil
+	}
 
-	key := uint(subscriptionPacketID | localPacketIDFlag)
-	err := c.Persistence.Store(key, packet.buf)
+	// measure & validate
+	size := 2 + len(topicFilters)*2
+	for _, s := range topicFilters {
+		if err := stringCheck(s); err != nil {
+			return err
+		}
+		size += len(s)
+	}
+	if size > packetMax {
+		return errPacketMax
+	}
+
+	p := packetPool.Get().(*packet)
+	defer packetPool.Put(p)
+	if cap(p.buf) < size+5 {
+		p.buf = make([]byte, 0, size)
+	}
+
+	p.buf = append(p.buf[:0], unsubReq<<4)
+	for size > 127 {
+		p.buf = append(p.buf, byte(size|128))
+		size >>= 7
+	}
+	p.buf = append(p.buf, byte(size), 0, 1) // including subscriptionPacketID
+	for _, s := range topicFilters {
+		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
+		p.buf = append(p.buf, s...)
+	}
+
+	returnCodes := make(chan byte)
+	c.subscriptionAck <- returnCodes // lock
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), p.buf)
 	if err != nil {
-		// TODO(pascaldekloe): Trigger reset
+		<-c.subscriptionAck // unlock
 		return err
 	}
-	c.keyQ <- key
+	if err := c.write(p.buf); err != nil {
+		panic("TODO(pascaldekloe): Trigger reset")
+	}
 
-	panic("TODO: await ack")
+	for range returnCodes {
+		panic("TODO(pascaldekloe): Trigger reset")
+	}
+	return nil
 }
 
 // Ping makes a roundtrip to validate the connection.
 func (c *Client) Ping() error {
-	c.outQ <- pingPacket
+	ch := make(chan struct{})
+	c.pingAck <- ch // lock
 
-	panic("TODO: await ack")
+	if err := c.write(pingPacket.buf); err != nil {
+		<-c.pingAck // unlock
+		// TODO(pascaldekloe): Trigger reset
+		return err
+	}
+
+	<-ch
+	return nil
 }
 
 // Disconnect is a graceful termination, which also discards the Will.

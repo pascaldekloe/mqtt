@@ -9,6 +9,41 @@ import (
 	"fmt"
 )
 
+const (
+	packetMax = 268_435_455 // 4-byte varint
+	stringMax = 65535       // 16-bit size prefixes
+)
+
+var (
+	errPacketMax = errors.New("mqtt: packet limit of 256 MiB exceeded")
+	errStringMax = errors.New("mqtt: string exceeds 65535 bytes")
+
+	errUTF8 = errors.New("mqtt: invalid UTF-8 byte sequence")
+	errNull = errors.New("mqtt: string contains null characer")
+)
+
+func stringCheck(s string) error {
+	if len(s) > stringMax {
+		return errStringMax
+	}
+	for _, r := range s {
+		// “The character data in a UTF-8 encoded string MUST be
+		// well-formed UTF-8 as defined by the Unicode specification …”
+		// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-1
+		if r == '\uFFFD' {
+			return errUTF8
+		}
+
+		// “A UTF-8 encoded string MUST NOT include an encoding of the
+		// null character U+0000.”
+		// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-2
+		if r == 0 {
+			return errNull
+		}
+	}
+	return nil
+}
+
 // ErrClosed signals an attempt to use the connection after disconnect.
 // Network errors that are not temporary [net.Error.Temporary] cause an
 // automatic disconnect [net.Conn.Close], conform the MQTT protocol.
