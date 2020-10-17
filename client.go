@@ -64,7 +64,8 @@ type ClientConfig struct {
 type Client struct {
 	ClientConfig // read-only
 
-	conn net.Conn
+	// Semaphore singleton for writes.
+	connSem chan net.Conn
 
 	outQ chan *packet // high-prority send queue
 	keyQ chan uint    // storage send queue
@@ -84,6 +85,7 @@ type Client struct {
 func NewClient(config *ClientConfig) *Client {
 	c := &Client{
 		ClientConfig:    *config, // copy
+		connSem:         make(chan net.Conn, 1),
 		pingAck:         make(chan chan<- struct{}, 1),
 		subscriptionAck: make(chan chan<- byte, 1),
 		closed:          make(chan struct{}),
@@ -100,7 +102,12 @@ func NewClient(config *ClientConfig) *Client {
 }
 
 func (c *Client) write(p []byte) error {
-	n, err := c.conn.Write(p)
+	conn := <-c.connSem // lock
+	defer func() {
+		c.connSem <- conn // release
+	}()
+
+	n, err := conn.Write(p)
 	for err != nil {
 		select {
 		case <-c.closed:
@@ -111,7 +118,7 @@ func (c *Client) write(p []byte) error {
 
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Temporary() {
-			c.conn.Close()
+			conn.Close()
 			return err
 		}
 
@@ -120,7 +127,7 @@ func (c *Client) write(p []byte) error {
 		time.Sleep(delay)
 
 		p = p[n:]
-		n, err = c.conn.Write(p)
+		n, err = conn.Write(p)
 		// handle error in current loop
 	}
 
@@ -128,7 +135,12 @@ func (c *Client) write(p []byte) error {
 }
 
 func (c *Client) writeBuffers(buffers net.Buffers) error {
-	n, err := buffers.WriteTo(c.conn)
+	conn := <-c.connSem // lock
+	defer func() {
+		c.connSem <- conn // release
+	}()
+
+	n, err := buffers.WriteTo(conn)
 	for err != nil {
 		select {
 		case <-c.closed:
@@ -139,7 +151,7 @@ func (c *Client) writeBuffers(buffers net.Buffers) error {
 
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Temporary() {
-			c.conn.Close()
+			conn.Close()
 			return err
 		}
 
@@ -160,7 +172,7 @@ func (c *Client) writeBuffers(buffers net.Buffers) error {
 		log.Print("mqtt: write retry in ", delay, " on ", err)
 		time.Sleep(delay)
 
-		n, err = buffers.WriteTo(c.conn)
+		n, err = buffers.WriteTo(conn)
 		// handle error in current loop
 	}
 
@@ -172,18 +184,27 @@ func (c *Client) readRoutine() {
 	defer close(c.closed)
 
 	for {
-		c.reconnect()
-		r := bufio.NewReaderSize(c.conn, 2048)
-		for {
-			err := c.nextPacket(r)
-			if err == nil {
-				continue
+		r, err := c.connect()
+		switch err {
+		case nil:
+			for {
+				err := c.nextPacket(r)
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, ErrClosed) {
+					return
+				}
+				log.Print(err)
+				break
 			}
-			if errors.Is(err, ErrClosed) {
-				return
-			}
+
+		case ErrClosed:
+			return
+
+		default:
 			log.Print(err)
-			break
+			time.Sleep(c.RetryDelay)
 		}
 	}
 }
@@ -512,18 +533,12 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 	return nil
 }
 
-// Reconnect initiates the transport layer (c.conn).
-// The current connection (if any) is terminated.
-func (c *Client) reconnect() error {
-	if c.conn != nil {
-		c.conn.Close()
-	}
-
+// Connect initiates the transport layer and populates c.connSem.
+func (c *Client) connect() (*bufio.Reader, error) {
 	conn, err := c.Connecter()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.conn = conn
 
 	// launch handshake
 	size := 6 // variable header
@@ -576,44 +591,42 @@ func (c *Client) reconnect() error {
 		p.addBytes(c.Password)
 	}
 
-	if err := c.write(p.buf); err != nil {
-		return err
+	if _, err := conn.Write(p.buf); err != nil {
+		conn.Close()
+		return nil, err
 	}
 
-	var buf [4]byte
-	n, err := c.conn.Read(buf[:])
-	if err != nil {
-		return err
+	r := bufio.NewReaderSize(conn, 16)
+
+	if head, err := r.ReadByte(); err != nil {
+		conn.Close()
+		return nil, err
+	} else if head != connAck<<4 {
+		return nil, fmt.Errorf("mqtt: received head %#x, want connect ␆—connection closed", head)
 	}
 
-	for {
-		if n > 0 && buf[0] != connAck<<4 {
-			return fmt.Errorf("mqtt: received packet type %#x on connect—connection closed", buf[0]>>4)
-		}
-		if n > 1 && buf[1] != 2 {
-			return fmt.Errorf("mqtt: connect ␆ remaining length is %d instead of 2—connection closed", buf[1])
-		}
-		if n > 2 && buf[2] > 1 {
-			return fmt.Errorf("mqtt: received reserved connect ␆ flags %#x—connection closed", buf[2])
-		}
-		if n > 3 {
-			break
-		}
-
-		more, err := c.conn.Read(buf[n:])
-		if err != nil {
-			return err
-		}
-		n += more
+	if remainingLen, err := r.ReadByte(); err != nil {
+		conn.Close()
+		return nil, err
+	} else if remainingLen != 2 {
+		return nil, fmt.Errorf("mqtt: connect ␆ remaining length is %d instead of 2—connection closed", remainingLen)
 	}
 
-	if code := connectReturn(buf[3]); code != accepted {
-		return code
+	if flags, err := r.ReadByte(); err != nil {
+		conn.Close()
+		return nil, err
+	} else if flags > 1 {
+		return nil, fmt.Errorf("mqtt: received reserved connect ␆ flags %#x—connection closed", flags)
 	}
 
-	c.conn.SetDeadline(time.Time{}) // clear
+	if code, err := r.ReadByte(); err != nil {
+		conn.Close()
+		return nil, err
+	} else if r := connectReturn(code); r != accepted {
+		return nil, r
+	}
 
-	return nil
+	return bufio.NewReaderSize(conn, 64), nil
 }
 
 // Publish persists the message (for network submission). Error returns other
@@ -838,12 +851,5 @@ func (c *Client) Ping() error {
 // Disconnect is a graceful termination, which also discards the Will.
 // The underlying connection is closed.
 func (c *Client) Disconnect() error {
-	_, err := c.conn.Write(disconnPacket.buf)
-
-	closeErr := c.conn.Close()
-	if err == nil {
-		err = closeErr
-	}
-
-	return err
+	return c.write(disconnPacket.buf)
 }
