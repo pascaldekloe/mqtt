@@ -5,6 +5,9 @@
 
 … an MQTT library for the Go programming language.
 
+The development is kindly sponsored by
+![Northvolt](https://github.com/pascaldekloe/mqtt/raw/master/doc/northvolt.svg)—the sustainable battery manufacturer.
+
 This is free and unencumbered software released into the
 [public domain](https://creativecommons.org/publicdomain/zero/1.0).
 
