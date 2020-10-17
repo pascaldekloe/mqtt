@@ -67,9 +67,6 @@ type Client struct {
 	// Semaphore singleton for writes.
 	connSem chan net.Conn
 
-	outQ chan *packet // high-prority send queue
-	keyQ chan uint    // storage send queue
-
 	closed chan struct{}
 
 	// Semaphore allows for one ping request at a time.
@@ -357,8 +354,11 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		case AtLeastOnce << 1:
 			if c.Receive(topic, message) {
 				p := packetPool.Get().(*packet)
+				defer packetPool.Put(p)
 				p.buf = append(p.buf[:0], pubAck<<4, 2, byte(packetID>>8), byte(packetID))
-				c.outQ <- p
+				if err := c.write(p.buf); err != nil {
+					return err
+				}
 			}
 
 		case ExactlyOnce << 1:
@@ -372,8 +372,11 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			}
 
 			p := packetPool.Get().(*packet)
+			defer packetPool.Put(p)
 			p.buf = append(p.buf[:0], pubReceived<<4, 2, byte(packetID>>8), byte(packetID))
-			c.outQ <- p
+			if err := c.write(p.buf); err != nil {
+				return err
+			}
 
 		default:
 			return fmt.Errorf("%w: received publish with reserved QoS", errProtoReset)
@@ -404,8 +407,11 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		}
 
 		p := packetPool.Get().(*packet)
+		defer packetPool.Put(p)
 		p.buf = append(p.buf[:0], pubComplete<<4, 2, byte(packetID>>8), byte(packetID))
-		c.outQ <- p
+		if err := c.write(p.buf); err != nil {
+			return err
+		}
 
 	case pubAck: // confirm of Publish with AtLeastOnce
 		if len(p) != 2 {
@@ -440,7 +446,9 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		if err != nil {
 			return err
 		}
-		c.outQ <- p
+		if err := c.write(p.buf); err != nil {
+			return err
+		}
 
 	case pubComplete: // second confirm of Publish with ExactlyOnce
 		if len(p) != 2 {
@@ -668,7 +676,9 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 		p.addString(topic)
 		p.buf = append(p.buf, message...)
 
-		return c.write(p.buf)
+		if err := c.write(p.buf); err != nil {
+			return err
+		}
 
 	case AtLeastOnce:
 		packetID = c.atLeastOnceLine.AssignID()
@@ -698,7 +708,10 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 	if err != nil {
 		return err
 	}
-	c.keyQ <- key
+
+	if err := c.writeBuffers(buffers); err != nil {
+		log.Print("mqtt: will retry on ", err)
+	}
 	return nil
 }
 
