@@ -7,6 +7,7 @@ package mqtt
 import (
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 )
 
@@ -169,7 +170,7 @@ type Persistence interface {
 	// Upserts data under the key. Malfunction may cause resubmission with
 	// OnceOrMore or ExactlyOnce deliveries. The Client Publish operation
 	// fails entirely on Persist errors.
-	Store(key uint, data []byte) error
+	Store(key uint, data net.Buffers) error
 
 	// Removes data under the key. Malfunction may threaten the availability
 	// of Persist in terms of storage space.

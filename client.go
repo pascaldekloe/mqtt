@@ -119,10 +119,49 @@ func (c *Client) write(p []byte) error {
 		log.Print("mqtt: write retry in ", delay, " on ", err)
 		time.Sleep(delay)
 
-		var more int
-		more, err = c.conn.Write(p[n:])
+		p = p[n:]
+		n, err = c.conn.Write(p)
 		// handle error in current loop
-		n += more
+	}
+
+	return nil
+}
+
+func (c *Client) writeBuffers(buffers net.Buffers) error {
+	n, err := buffers.WriteTo(c.conn)
+	for err != nil {
+		select {
+		case <-c.closed:
+			return ErrClosed
+		default:
+			break
+		}
+
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Temporary() {
+			c.conn.Close()
+			return err
+		}
+
+		var todo net.Buffers
+		// don't modify original buffers; it may be used by Store
+		for i, bytes := range buffers {
+			if n >= int64(len(bytes)) {
+				n -= int64(len(bytes))
+				continue
+			}
+			todo = append(todo, bytes[n:])
+			todo = append(todo, buffers[i+1:]...)
+			break
+		}
+		buffers = todo
+
+		delay := c.RetryDelay
+		log.Print("mqtt: write retry in ", delay, " on ", err)
+		time.Sleep(delay)
+
+		n, err = buffers.WriteTo(c.conn)
+		// handle error in current loop
 	}
 
 	return nil
@@ -305,7 +344,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			bytes := make([]byte, len(topic)+1+len(message))
 			copy(bytes, topic)
 			copy(bytes[len(topic)+1:], message)
-			err := c.Persistence.Store(packetID, bytes)
+			err := c.Persistence.Store(packetID, net.Buffers{bytes})
 			if err != nil {
 				log.Print("mqtt: persistence malfuncion: ", err)
 				return nil // don't confirm
@@ -376,7 +415,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 
 		p := packetPool.Get().(*packet)
 		p.buf = append(p.buf[:0], pubRelease<<4, 2, byte(packetID>>8), byte(packetID))
-		err = c.Persistence.Store(packetID, p.buf)
+		err = c.Persistence.Store(packetID, net.Buffers{p.buf})
 		if err != nil {
 			return err
 		}
@@ -638,10 +677,11 @@ func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) 
 
 	p.addString(topic)
 	p.buf = append(p.buf, byte(packetID>>8), byte(packetID))
-	p.buf = append(p.buf, message...)
+
+	buffers := net.Buffers{p.buf, message}
 
 	key := packetID | localPacketIDFlag
-	err := c.Persistence.Store(key, p.buf)
+	err := c.Persistence.Store(key, buffers)
 	if err != nil {
 		return err
 	}
@@ -688,7 +728,7 @@ func (c *Client) Subscribe(min, max QoS, topicFilters ...string) error {
 
 	returnCodes := make(chan byte, len(topicFilters))
 	c.subscriptionAck <- returnCodes // lock
-	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), p.buf)
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{p.buf})
 	if err != nil {
 		<-c.subscriptionAck // unlock
 		return err
@@ -765,7 +805,7 @@ func (c *Client) Unsubscribe(topicFilters ...string) error {
 
 	returnCodes := make(chan byte)
 	c.subscriptionAck <- returnCodes // lock
-	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), p.buf)
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{p.buf})
 	if err != nil {
 		<-c.subscriptionAck // unlock
 		return err
