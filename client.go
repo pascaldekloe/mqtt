@@ -77,7 +77,10 @@ func UnsecuredConnecter(network, address string, timeout time.Duration) Connecte
 // impose its own earlier timeout. For example, TCP timeouts
 // are often around 3 minutes.
 func SecuredConnecter(network, address string, conf *tls.Config, timeout time.Duration) Connecter {
-	dialer := &tls.Dialer{&net.Dialer{Timeout: timeout}, conf}
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: timeout},
+		Config:    conf,
+	}
 	return func() (net.Conn, error) {
 		return dialer.Dial(network, address)
 	}
