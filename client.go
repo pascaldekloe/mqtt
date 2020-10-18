@@ -2,7 +2,6 @@ package mqtt
 
 import (
 	"bufio"
-	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -36,16 +35,20 @@ func NewNClientPool(n int, config *ClientConfig) *ClientPool {
 	return &pool
 }
 
-// Publish invokes Publish on a Client.
-func (pool *ClientPool) Publish(ctx context.Context, topic string, message []byte, deliver QoS) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case client := <- pool.clients:
-		err := client.Publish(topic, message, deliver)
-		pool.clients <- client
-		return err
-	}
+// PublishAtLeastOnce invokes PublishAtLeastOnce on a Client.
+func (pool *ClientPool) PublishAtLeastOnce(topic string, message []byte) error {
+	client := <-pool.clients
+	err := client.PublishAtLeastOnce(topic, message)
+	pool.clients <- client
+	return err
+}
+
+// PublishExactlyOnce invokes PublishExactlyOnce on a Client.
+func (pool *ClientPool) PublishExactlyOnce(topic string, message []byte) error {
+	client := <-pool.clients
+	err := client.PublishExactlyOnce(topic, message)
+	pool.clients <- client
+	return err
 }
 
 // Receive gets invoked for inbound messages. AtMostOnce ignores the return.
@@ -676,71 +679,114 @@ func (c *Client) connect() (*bufio.Reader, error) {
 	return bufio.NewReaderSize(conn, 64), nil
 }
 
-// Publish persists the message (for network submission). Error returns other
-// than ErrTopicName, ErrMessageSize and ErrRequestLimit signal fatal storage
-// malfunction. Thus the actual publication is decoupled from the invokation.
-//
-// Deliver AtMostOnce causes message to be send the server, and that'll be the
-// end of operation. Subscribers may or may not receive the message when subject
-// to error. Use AtLeastOnce or ExactlyOne for more protection, at the cost of
-// higher (performance) overhead.
-//
-// Multiple goroutines may invoke Publish simultaneously.
-func (c *Client) Publish(topic string, message []byte, deliver QoS) error {
-	return c.publish(topic, message, deliver, 0)
+// Publish wires the message with QoS level 0—an “at most once” guarantee.
+// Subscribers may or may not receive the message when subject to error.
+// This fire-and-forget delivery is the most efficient option.
+// Multiple goroutines may invoke Publish similtaneously.
+func (c *Client) Publish(topic string, message []byte) error {
+	return c.publish(topic, message, pubMsg<<4)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
 // server, so that they can be delivered to future subscribers.
 func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
-	return c.publish(topic, message, deliver, retainFlag)
+	return c.publish(topic, message, pubMsg<<4|retainFlag)
 }
 
-func (c *Client) publish(topic string, message []byte, deliver QoS, flags byte) error {
-	var packetID uint
+// PublishAtLeastOnce persists the message for delivery with QoS level 1—an “at
+// least once” guarantee. This acknowledged delivery is more reliable than a
+// plain Publish, at the expense of persistence overhead on both the client side
+// and the broker side, plus an response message over the network.
+func (c *Client) PublishAtLeastOnce(topic string, message []byte) error {
+	packet, err := pubmsg(topic, message, pubMsg<<4|AtLeastOnce<<1)
+	if err != nil {
+		return err
+	}
+	return c.persistAndTrySend(c.atLeastOnceLine.AssignID(), packet, message)
+}
 
-	switch deliver {
-	case AtMostOnce:
-		p := packetPool.Get().(*packet)
-		defer packetPool.Put(p)
-		p.buf = append(p.buf[:0], pubMsg<<4|flags)
+// PublishAtLeastOnceRetained acts like PublishAtLeastOnce, but causes the
+// message to be stored on the server, so that they can be delivered to future
+// subscribers.
+func (c *Client) PublishAtLeastOnceRetained(topic string, message []byte) error {
+	packet, err := pubmsg(topic, message, pubMsg<<4|AtLeastOnce<<1|retainFlag)
+	if err != nil {
+		return err
+	}
+	return c.persistAndTrySend(c.atLeastOnceLine.AssignID(), packet, message)
+}
 
-		size := 2 + len(topic) + len(message)
-		for size > 127 {
-			p.buf = append(p.buf, byte(size|128))
-			size >>= 7
-		}
-		p.buf = append(p.buf, byte(size))
+// PublishExactlyOnce persists the message for delivery with QoS level 2—an
+// “exactly once” guarantee. This double acknowledged delivery prevents the
+// duplicate reception chance with PublishAtLeastOnce, at the expense of an
+// extra network roundtrip.
+func (c *Client) PublishExactlyOnce(topic string, message []byte) error {
+	packet, err := pubmsg(topic, message, pubMsg<<4|ExactlyOnce<<1)
+	if err != nil {
+		return err
+	}
+	return c.persistAndTrySend(c.exactlyOnceLine.AssignID(), packet, message)
+}
 
-		p.addString(topic)
-		p.buf = append(p.buf, message...)
+// PublishExactlyOnceRetained acts like PublishExactlyOnce, but causes the
+// message to be stored on the server, so that they can be delivered to future
+// subscribers.
+func (c *Client) PublishExactlyOnceRetained(topic string, message []byte) error {
+	packet, err := pubmsg(topic, message, pubMsg<<4|ExactlyOnce<<1|retainFlag)
+	if err != nil {
+		return err
+	}
+	return c.persistAndTrySend(c.exactlyOnceLine.AssignID(), packet, message)
+}
 
-		if err := c.write(p.buf); err != nil {
-			return err
-		}
-
-	case AtLeastOnce:
-		packetID = c.atLeastOnceLine.AssignID()
-
-	case ExactlyOnce:
-		packetID = c.exactlyOnceLine.AssignID()
+func (c *Client) publish(topic string, message []byte, head byte) error {
+	if err := stringCheck(topic); err != nil {
+		return err
+	}
+	size := 2 + len(topic) + len(message)
+	if size < 0 || size > packetMax {
+		return errPacketMax
 	}
 
 	p := packetPool.Get().(*packet)
 	defer packetPool.Put(p)
-	p.buf = append(p.buf[:0], pubMsg<<4|byte(deliver)<<1|flags)
-
-	size := 4 + len(topic) + len(message)
-	for size > 127 {
+	p.buf = append(p.buf[:0], head)
+	for ; size > 127; size >>= 7 {
 		p.buf = append(p.buf, byte(size|128))
-		size >>= 7
 	}
 	p.buf = append(p.buf, byte(size))
+	p.buf = append(p.buf, byte(len(topic)>>8), byte(len(topic)))
+	p.buf = append(p.buf, topic...)
 
-	p.addString(topic)
-	p.buf = append(p.buf, byte(packetID>>8), byte(packetID))
+	return c.writeBuffers(net.Buffers{p.buf, message})
+}
 
-	buffers := net.Buffers{p.buf, message}
+// Pubmsg returns a publish message start, without the packet identifier,
+// and without the payload.
+func pubmsg(topic string, message []byte, head byte) (*packet, error) {
+	if err := stringCheck(topic); err != nil {
+		return nil, err
+	}
+	size := 4 + len(topic) + len(message)
+	if size < 0 || size > packetMax {
+		return nil, errPacketMax
+	}
+
+	p := packetPool.Get().(*packet)
+	p.buf = append(p.buf[:0], head)
+	for ; size > 127; size >>= 7 {
+		p.buf = append(p.buf, byte(size|128))
+	}
+	p.buf = append(p.buf, byte(size))
+	p.buf = append(p.buf, byte(len(topic)>>8), byte(len(topic)))
+	p.buf = append(p.buf, topic...)
+	return p, nil
+}
+
+func (c *Client) persistAndTrySend(packetID uint, packet *packet, message []byte) error {
+	defer packetPool.Put(packet)
+	packet.buf = append(packet.buf, byte(packetID>>8), byte(packetID))
+	buffers := net.Buffers{packet.buf, message}
 
 	key := packetID | localPacketIDFlag
 	err := c.Persistence.Store(key, buffers)
