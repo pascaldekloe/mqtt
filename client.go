@@ -461,7 +461,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		}
 		packetID := uint(binary.BigEndian.Uint16(p))
 
-		err := c.atLeastOnceLine.FreeID(packetID)
+		err := c.atLeastOnceLine.freeID(packetID)
 		if err != nil {
 			return err
 		}
@@ -477,7 +477,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		}
 		packetID := uint(binary.BigEndian.Uint16(p))
 
-		err := c.exactlyOnceLine.ReleaseID(packetID)
+		err := c.exactlyOnceLine.releaseID(packetID)
 		if err != nil {
 			return err
 		}
@@ -498,7 +498,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		}
 		packetID := uint(binary.BigEndian.Uint16(p))
 
-		err := c.exactlyOnceLine.FreeID(packetID)
+		err := c.exactlyOnceLine.freeID(packetID)
 		if err != nil {
 			return err
 		}
@@ -720,7 +720,7 @@ func (c *Client) PublishAtLeastOnce(topic string, message []byte) error {
 	if err != nil {
 		return err
 	}
-	return c.persistAndTrySend(c.atLeastOnceLine.AssignID(), packet, message)
+	return c.persistAndTrySend(c.atLeastOnceLine.assignID(), packet, message)
 }
 
 // PublishAtLeastOnceRetained acts like PublishAtLeastOnce, but causes the
@@ -731,7 +731,7 @@ func (c *Client) PublishAtLeastOnceRetained(topic string, message []byte) error 
 	if err != nil {
 		return err
 	}
-	return c.persistAndTrySend(c.atLeastOnceLine.AssignID(), packet, message)
+	return c.persistAndTrySend(c.atLeastOnceLine.assignID(), packet, message)
 }
 
 // PublishExactlyOnce persists the message for delivery with QoS level 2—an
@@ -743,7 +743,7 @@ func (c *Client) PublishExactlyOnce(topic string, message []byte) error {
 	if err != nil {
 		return err
 	}
-	return c.persistAndTrySend(c.exactlyOnceLine.AssignID(), packet, message)
+	return c.persistAndTrySend(c.exactlyOnceLine.assignID(), packet, message)
 }
 
 // PublishExactlyOnceRetained acts like PublishExactlyOnce, but causes the
@@ -754,7 +754,7 @@ func (c *Client) PublishExactlyOnceRetained(topic string, message []byte) error 
 	if err != nil {
 		return err
 	}
-	return c.persistAndTrySend(c.exactlyOnceLine.AssignID(), packet, message)
+	return c.persistAndTrySend(c.exactlyOnceLine.assignID(), packet, message)
 }
 
 func (c *Client) publish(topic string, message []byte, head byte) error {

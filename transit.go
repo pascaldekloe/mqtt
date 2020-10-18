@@ -14,7 +14,7 @@ const subscriptionPacketID = 0x0001
 type atLeastOnceLine uint64
 
 // AssignID returns the next packet identifier in line.
-func (line *atLeastOnceLine) AssignID() (packetID uint) {
+func (line *atLeastOnceLine) assignID() (packetID uint) {
 	u := atomic.LoadUint64((*uint64)(line))
 
 	// “… PUBLISH (in cases where QoS > 0) Control Packets MUST contain a
@@ -31,12 +31,12 @@ func (line *atLeastOnceLine) AssignID() (packetID uint) {
 	return packetID
 }
 
-// FreeID reuses the oldest packet identifier from AssignID.
+// FreeID reuses the oldest packet identifier from assignID.
 //
 // “… MUST send PUBACK packets in the order in which the corresponding
 // PUBLISH packets were received”
 // — MQTT Version 3.1.1, conformance statement MQTT-4.6.0-2
-func (line *atLeastOnceLine) FreeID(packetID uint) error {
+func (line *atLeastOnceLine) freeID(packetID uint) error {
 	u := atomic.LoadUint64((*uint64)(line))
 
 	// Normalise both the offset (in the 32 most significant bits)
@@ -79,7 +79,7 @@ func (line *atLeastOnceLine) FreeID(packetID uint) error {
 type exactlyOnceLine uint64
 
 // AssignID returns the next packet identifier in line.
-func (line *exactlyOnceLine) AssignID() (packetID uint) {
+func (line *exactlyOnceLine) assignID() (packetID uint) {
 	u := atomic.LoadUint64((*uint64)(line))
 
 	// “… PUBLISH (in cases where QoS > 0) Control Packets MUST contain a
@@ -96,21 +96,21 @@ func (line *exactlyOnceLine) AssignID() (packetID uint) {
 	return packetID
 }
 
-// ReleaseID releases the oldest packet identifier from AssignID.
+// ReleaseID releases the oldest packet identifier from assignID.
 //
 // “… MUST send PUBREC packets in the order in which the corresponding
 // PUBLISH packets were received”
 // — MQTT Version 3.1.1, conformance statement MQTT-4.6.0-3
-func (line *exactlyOnceLine) ReleaseID(packetID uint) error {
+func (line *exactlyOnceLine) releaseID(packetID uint) error {
 	panic("TODO")
 }
 
-// FreeID reuses the oldest packet identifier from ReleaseID.
+// FreeID reuses the oldest packet identifier from releaseID.
 //
 // “… MUST send PUBREL packets in the order in which the corresponding
 // PUBREC packets were received”
 // — MQTT Version 3.1.1, conformance statement MQTT-4.6.0-4
-func (line *exactlyOnceLine) FreeID(packetID uint) error {
+func (line *exactlyOnceLine) freeID(packetID uint) error {
 	u := atomic.LoadUint64((*uint64)(line))
 
 	// Normalise both the offset (in the 32 most significant bits)
