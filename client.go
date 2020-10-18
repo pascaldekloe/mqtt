@@ -629,16 +629,34 @@ func (c *Client) connect() (*bufio.Reader, error) {
 	p.buf = append(p.buf, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
 
 	// append payload
-	p.addString(c.ClientID)
+	if err := stringCheck(c.ClientID); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	p.buf = append(p.buf, byte(len(c.ClientID)>>8), byte(len(c.ClientID)))
+	p.buf = append(p.buf, c.ClientID...)
+
 	if w := c.Will; w != nil {
-		p.addString(w.Topic)
-		p.addBytes(w.Message)
+		if err := stringCheck(w.Topic); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		p.buf = append(p.buf, byte(len(w.Topic)>>8), byte(len(w.Topic)))
+		p.buf = append(p.buf, w.Topic...)
+		p.buf = append(p.buf, byte(len(w.Message)>>8), byte(len(w.Message)))
+		p.buf = append(p.buf, w.Message...)
 	}
 	if c.UserName != "" {
-		p.addString(c.UserName)
+		if err := stringCheck(c.UserName); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		p.buf = append(p.buf, byte(len(c.UserName)>>8), byte(len(c.UserName)))
+		p.buf = append(p.buf, c.UserName...)
 	}
 	if c.Password != nil {
-		p.addBytes(c.Password)
+		p.buf = append(p.buf, byte(len(c.Password)>>8), byte(len(c.Password)))
+		p.buf = append(p.buf, c.Password...)
 	}
 
 	if _, err := conn.Write(p.buf); err != nil {

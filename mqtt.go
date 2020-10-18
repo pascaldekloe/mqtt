@@ -16,16 +16,6 @@ type packet struct {
 	buf []byte
 }
 
-func (p *packet) addString(s string) {
-	p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
-	p.buf = append(p.buf, s...)
-}
-
-func (p *packet) addBytes(b []byte) {
-	p.buf = append(p.buf, byte(len(b)>>8), byte(len(b)))
-	p.buf = append(p.buf, b...)
-}
-
 // Fixed Packets
 var (
 	pingPacket    = &packet{[]byte{ping << 4, 0}}
