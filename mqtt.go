@@ -74,14 +74,11 @@ var (
 	ErrMessageSize = errors.New("mqtt: message size exceeds 268,435,451 B minus UTF-8 length of topic name")
 )
 
-// QoS defines the delivery quality of service.
-type QoS uint
-
-// Quality of Service Levels
+// Quality of Service (QoS) are defines as numeric levels.
 const (
-	AtMostOnce   = iota // fire and forget
-	AtLeastOnce         // network round trip + Persistence
-	ExactlyOnce         // two network round trips + Persistence
+	atMostOnce   = iota // fire and forget
+	atLeastOnce         // network round trip + Persistence
+	exactlyOnce         // two network round trips + Persistence
 	reservedQoS3        // must not be used
 )
 
@@ -141,11 +138,12 @@ type Will struct {
 	// Actual payload.
 	Message []byte
 
-	// Delivery constraints.
-	Deliver QoS
-
 	// Persistence constraints.
 	Retain bool
+
+	// Delivery constraints.
+	AtLeastOnce bool // raises the QoS to level 1
+	ExactlyOnce bool // raises the QoS to level 2
 }
 
 // LocalPacketIDFlag marks the key in the a local address space.

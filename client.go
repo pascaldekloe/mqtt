@@ -393,10 +393,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 		message := p[i+2:]
 
 		switch firstByte & 0b110 {
-		case AtMostOnce << 1:
+		case atMostOnce << 1:
 			c.Receive(topic, message)
 
-		case AtLeastOnce << 1:
+		case atLeastOnce << 1:
 			if c.Receive(topic, message) {
 				p := packetPool.Get().(*packet)
 				defer packetPool.Put(p)
@@ -406,7 +406,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 				}
 			}
 
-		case ExactlyOnce << 1:
+		case exactlyOnce << 1:
 			bytes := make([]byte, len(topic)+1+len(message))
 			copy(bytes, topic)
 			copy(bytes[len(topic)+1:], message)
@@ -427,7 +427,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return fmt.Errorf("%w: received publish with reserved QoS", errProtoReset)
 		}
 
-	case pubRelease: // second round trip for ExactlyOnce reception
+	case pubRelease: // second round trip for exactlyOnce reception
 		if len(p) != 2 {
 			return fmt.Errorf("%w: received publish release with remaining length %d", errProtoReset, len(p))
 		}
@@ -458,7 +458,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return err
 		}
 
-	case pubAck: // confirm of Publish with AtLeastOnce
+	case pubAck: // confirm PublishAtLeastOnce
 		if len(p) != 2 {
 			return fmt.Errorf("%w: received publish ␆ with remaining length %d", errProtoReset, len(p))
 		}
@@ -474,7 +474,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return err
 		}
 
-	case pubReceived: // first confirm of Publish with ExactlyOnce
+	case pubReceived: // first confirm of PublishExactlyOnce
 		if len(p) != 2 {
 			return fmt.Errorf("%w: received publish received with remaining length %d", errProtoReset, len(p))
 		}
@@ -495,7 +495,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return err
 		}
 
-	case pubComplete: // second confirm of Publish with ExactlyOnce
+	case pubComplete: // second confirm of PublishExactlyOnce
 		if len(p) != 2 {
 			return fmt.Errorf("%w: received publish complete with remaining length %d", errProtoReset, len(p))
 		}
@@ -611,7 +611,12 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		if w.Retain {
 			flags |= 1 << 5
 		}
-		flags |= uint(w.Deliver) << 3
+		switch {
+		case w.ExactlyOnce:
+			flags |= exactlyOnce << 3
+		case w.AtLeastOnce:
+			flags |= atLeastOnce << 3
+		}
 		flags |= 1 << 2
 	}
 	if c.CleanSession {
@@ -705,13 +710,13 @@ func (c *Client) connect() (*bufio.Reader, error) {
 // This fire-and-forget delivery is the most efficient option.
 // Multiple goroutines may invoke Publish similtaneously.
 func (c *Client) Publish(topic string, message []byte) error {
-	return c.publish(topic, message, pubMsg<<4)
+	return c.publish(topic, message, pubMsg<<4|atMostOnce<<1)
 }
 
 // PublishRetained acts like Publish, but causes the message to be stored on the
 // server, so that they can be delivered to future subscribers.
-func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) error {
-	return c.publish(topic, message, pubMsg<<4|retainFlag)
+func (c *Client) PublishRetained(topic string, message []byte) error {
+	return c.publish(topic, message, pubMsg<<4|atMostOnce<<1|retainFlag)
 }
 
 // PublishAtLeastOnce persists the message for delivery with QoS level 1—an “at
@@ -719,7 +724,7 @@ func (c *Client) PublishRetained(topic string, message []byte, deliver QoS) erro
 // plain Publish, at the expense of persistence overhead on both the client side
 // and the broker side, plus an response message over the network.
 func (c *Client) PublishAtLeastOnce(topic string, message []byte) error {
-	packet, err := pubmsg(topic, message, pubMsg<<4|AtLeastOnce<<1)
+	packet, err := pubmsg(topic, message, pubMsg<<4|atLeastOnce<<1)
 	if err != nil {
 		return err
 	}
@@ -730,7 +735,7 @@ func (c *Client) PublishAtLeastOnce(topic string, message []byte) error {
 // message to be stored on the server, so that they can be delivered to future
 // subscribers.
 func (c *Client) PublishAtLeastOnceRetained(topic string, message []byte) error {
-	packet, err := pubmsg(topic, message, pubMsg<<4|AtLeastOnce<<1|retainFlag)
+	packet, err := pubmsg(topic, message, pubMsg<<4|atLeastOnce<<1|retainFlag)
 	if err != nil {
 		return err
 	}
@@ -742,7 +747,7 @@ func (c *Client) PublishAtLeastOnceRetained(topic string, message []byte) error 
 // duplicate reception chance with PublishAtLeastOnce, at the expense of an
 // extra network roundtrip.
 func (c *Client) PublishExactlyOnce(topic string, message []byte) error {
-	packet, err := pubmsg(topic, message, pubMsg<<4|ExactlyOnce<<1)
+	packet, err := pubmsg(topic, message, pubMsg<<4|exactlyOnce<<1)
 	if err != nil {
 		return err
 	}
@@ -753,7 +758,7 @@ func (c *Client) PublishExactlyOnce(topic string, message []byte) error {
 // message to be stored on the server, so that they can be delivered to future
 // subscribers.
 func (c *Client) PublishExactlyOnceRetained(topic string, message []byte) error {
-	packet, err := pubmsg(topic, message, pubMsg<<4|ExactlyOnce<<1|retainFlag)
+	packet, err := pubmsg(topic, message, pubMsg<<4|exactlyOnce<<1|retainFlag)
 	if err != nil {
 		return err
 	}
@@ -854,7 +859,7 @@ func (c *Client) Subscribe(topicFilters ...string) error {
 	for _, s := range topicFilters {
 		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
 		p.buf = append(p.buf, s...)
-		p.buf = append(p.buf, ExactlyOnce)
+		p.buf = append(p.buf, exactlyOnce)
 	}
 
 	returnCodes := make(chan byte, len(topicFilters))
@@ -872,7 +877,7 @@ func (c *Client) Subscribe(topicFilters ...string) error {
 	var i int
 	for code := range returnCodes {
 		switch code {
-		case AtMostOnce, AtLeastOnce, ExactlyOnce:
+		case atMostOnce, atLeastOnce, exactlyOnce:
 			break // OK
 		case 0x80:
 			failures = append(failures, i)
