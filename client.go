@@ -822,8 +822,7 @@ func (c *Client) persistAndTrySend(packetID uint, packet *packet, message []byte
 }
 
 // Subscribe requests a subscription for all topics that match any of the filters.
-// The requested quality of service is a maximum for the server.
-func (c *Client) Subscribe(min, max QoS, topicFilters ...string) error {
+func (c *Client) Subscribe(topicFilters ...string) error {
 	if len(topicFilters) == 0 {
 		return nil
 	}
@@ -855,7 +854,7 @@ func (c *Client) Subscribe(min, max QoS, topicFilters ...string) error {
 	for _, s := range topicFilters {
 		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
 		p.buf = append(p.buf, s...)
-		p.buf = append(p.buf, byte(max))
+		p.buf = append(p.buf, ExactlyOnce)
 	}
 
 	returnCodes := make(chan byte, len(topicFilters))
@@ -869,33 +868,26 @@ func (c *Client) Subscribe(min, max QoS, topicFilters ...string) error {
 		panic("TODO(pascaldekloe): Trigger reset")
 	}
 
-	var illegalCode bool
-	var tooLows, failures []int
+	var failures []int
 	var i int
 	for code := range returnCodes {
 		switch code {
 		case AtMostOnce, AtLeastOnce, ExactlyOnce:
-			if QoS(code) < min {
-				tooLows = append(tooLows, i)
-			}
+			break // OK
 		case 0x80:
 			failures = append(failures, i)
 		default:
-			illegalCode = true
+			for range returnCodes {
+			} // flush
+			panic("TODO(pascaldekloe): Trigger reset")
 		}
 		i++
-	}
-	if illegalCode {
-		panic("TODO(pascaldekloe): Trigger reset")
 	}
 	if i > len(topicFilters) {
 		return fmt.Errorf("mqtt: subscription ␆ got %d return codes for %d topic filters", i, len(topicFilters))
 	}
 	if len(failures) != 0 {
 		return fmt.Errorf("mqtt: subscription ␆ got return code failure for topic filters %d", failures)
-	}
-	if len(tooLows) != 0 {
-		return fmt.Errorf("mqtt: subscription ␆ QoS level lower than minimum for topic filters %d", tooLows)
 	}
 	return nil
 }
