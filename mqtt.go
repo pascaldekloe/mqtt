@@ -122,28 +122,26 @@ type SessionConfig struct {
 	// Discard any previous session (on the server) and start a new one.
 	CleanSession bool
 
-	// Termination contract or disabled when nil.
-	Will *Will
+	// Will is a message publication to be send when the
+	// connection terminates without a disconnect package.
+	Will struct {
+		// Destination for the message.
+		// The Will feature is disabled when empty.
+		Topic string
+
+		// Actual payload.
+		Message []byte
+
+		// Persistence constraints.
+		Retain bool
+
+		// Delivery constraints.
+		AtLeastOnce bool // raises the QoS to level 1
+		ExactlyOnce bool // raises the QoS to level 2
+	}
 
 	// Timeout in seconds or disabled when zero.
 	KeepAlive uint16
-}
-
-// Will is a message publication to be send when the
-// connection terminates without a disconnect package.
-type Will struct {
-	// Destination for the message.
-	Topic string
-
-	// Actual payload.
-	Message []byte
-
-	// Persistence constraints.
-	Retain bool
-
-	// Delivery constraints.
-	AtLeastOnce bool // raises the QoS to level 1
-	ExactlyOnce bool // raises the QoS to level 2
 }
 
 // LocalPacketIDFlag marks the key in the a local address space.

@@ -133,11 +133,6 @@ func NewClient(config *ClientConfig) *Client {
 		closed:          make(chan struct{}),
 	}
 
-	if c.Will != nil {
-		willCopy := *c.Will
-		c.Will = &willCopy
-	}
-
 	go c.readRoutine()
 
 	return c
@@ -605,16 +600,16 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		size += 2 + len(c.Password)
 		flags |= 1 << 6
 	}
-	if w := c.Will; w != nil {
-		size += 2 + len(w.Topic)
-		size += 2 + len(w.Message)
-		if w.Retain {
+	if c.Will.Topic != "" {
+		size += 2 + len(c.Will.Topic)
+		size += 2 + len(c.Will.Message)
+		if c.Will.Retain {
 			flags |= 1 << 5
 		}
 		switch {
-		case w.ExactlyOnce:
+		case c.Will.ExactlyOnce:
 			flags |= exactlyOnce << 3
-		case w.AtLeastOnce:
+		case c.Will.AtLeastOnce:
 			flags |= atLeastOnce << 3
 		}
 		flags |= 1 << 2
@@ -644,15 +639,15 @@ func (c *Client) connect() (*bufio.Reader, error) {
 	p.buf = append(p.buf, byte(len(c.ClientID)>>8), byte(len(c.ClientID)))
 	p.buf = append(p.buf, c.ClientID...)
 
-	if w := c.Will; w != nil {
-		if err := stringCheck(w.Topic); err != nil {
+	if c.Will.Topic != "" {
+		if err := stringCheck(c.Will.Topic); err != nil {
 			conn.Close()
 			return nil, err
 		}
-		p.buf = append(p.buf, byte(len(w.Topic)>>8), byte(len(w.Topic)))
-		p.buf = append(p.buf, w.Topic...)
-		p.buf = append(p.buf, byte(len(w.Message)>>8), byte(len(w.Message)))
-		p.buf = append(p.buf, w.Message...)
+		p.buf = append(p.buf, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
+		p.buf = append(p.buf, c.Will.Topic...)
+		p.buf = append(p.buf, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
+		p.buf = append(p.buf, c.Will.Message...)
 	}
 	if c.UserName != "" {
 		if err := stringCheck(c.UserName); err != nil {
