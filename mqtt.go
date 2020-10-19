@@ -60,11 +60,6 @@ func stringCheck(s string) error {
 	return nil
 }
 
-// ErrClosed signals an attempt to use the connection after disconnect.
-// Network errors that are not temporary [net.Error.Temporary] cause an
-// automatic disconnect [net.Conn.Close], conform the MQTT protocol.
-var ErrClosed = errors.New("mqtt: connection closed")
-
 // ErrRequestLimit signals too many client requests.
 var ErrRequestLimit = errors.New("mqtt: maximum number of pending requests reached")
 

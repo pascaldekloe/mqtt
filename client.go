@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// ErrDown signals no-service.
+var ErrDown = errors.New("mqtt: connection unavailable")
+
+// ErrClosed signals use after Close.
+var ErrClosed = errors.New("mqtt: client closed")
+
 // Multiple goroutines may invoke methods on a ClientPool simultaneously.
 type ClientPool struct {
 	clients chan *Client
@@ -104,22 +110,29 @@ type ClientConfig struct {
 
 // Client manages a single network connection.
 //
-// Multiple goroutines may invoke methods on a Client, but NOT simultaneously.
-// See ClientPool for a safe alternative.
+// Multiple goroutines may invoke methods on a Client, but NOT always
+// simultaneously. The documentation on each respective method makes a full
+// statement about concurrency. See ClientPool for a safe alternative.
 type Client struct {
 	ClientConfig // read-only
 
-	// Semaphore singleton for writes.
+	// Semaphore singleton is for writes, with nil for ErrDown.
 	connSem chan net.Conn
 
-	closed chan struct{}
+	// Read routine controlls the connection, with reconnects.
+	// The quit signal is only read when the connection is down.
+	// The closed channel is closed after the read routine quits.
+	quit   chan struct{} // terimantion signal (buffer)
+	closed chan struct{} // termination acknowledgement
 
 	// Semaphore allows for one ping request at a time.
+	// When read/released, then the callback channel MUST be closed.
 	pingAck chan chan<- struct{}
-
 	// Semaphore allows for one subscribe or unsubscribe request at a time.
+	// When read/released, then the callback channel MUST be closed.
 	subscriptionAck chan chan<- byte
 
+	// Pending requests are separated by QoS level.
 	atLeastOnceLine
 	exactlyOnceLine
 }
@@ -128,9 +141,10 @@ func NewClient(config *ClientConfig) *Client {
 	c := &Client{
 		ClientConfig:    *config, // copy
 		connSem:         make(chan net.Conn, 1),
+		quit:            make(chan struct{}, 1),
+		closed:          make(chan struct{}),
 		pingAck:         make(chan chan<- struct{}, 1),
 		subscriptionAck: make(chan chan<- byte, 1),
-		closed:          make(chan struct{}),
 	}
 
 	go c.readRoutine()
@@ -143,19 +157,21 @@ func (c *Client) write(p []byte) error {
 	defer func() {
 		c.connSem <- conn // release
 	}()
-
-	n, err := conn.Write(p)
-	for err != nil {
+	if conn == nil {
 		select {
 		case <-c.closed:
 			return ErrClosed
 		default:
-			break
+			return ErrDown
 		}
+	}
 
+	n, err := conn.Write(p)
+	for err != nil {
 		var ne net.Error
-		if errors.As(err, &ne) && ne.Temporary() {
-			conn.Close()
+		if !errors.As(err, &ne) || !ne.Temporary() {
+			conn.Close() // reconnect from read routine
+			conn = nil   // causes ErrDown on release
 			return err
 		}
 
@@ -176,29 +192,32 @@ func (c *Client) writeBuffers(buffers net.Buffers) error {
 	defer func() {
 		c.connSem <- conn // release
 	}()
-
-	n, err := buffers.WriteTo(conn)
-	for err != nil {
+	if conn == nil {
 		select {
 		case <-c.closed:
 			return ErrClosed
 		default:
-			break
+			return ErrDown
 		}
+	}
 
+	n, err := buffers.WriteTo(conn)
+	for err != nil {
 		var ne net.Error
-		if errors.As(err, &ne) && ne.Temporary() {
-			conn.Close()
+		if !errors.As(err, &ne) || !ne.Temporary() {
+			conn.Close() // reconnect from read routine
+			conn = nil   // causes ErrDown on release
 			return err
 		}
 
+		// don't modify original buffers
 		var todo net.Buffers
-		// don't modify original buffers; it may be used by Store
 		for i, bytes := range buffers {
-			if n >= int64(len(bytes)) {
-				n -= int64(len(bytes))
+			if l := int64(len(bytes)); n > l {
+				n -= l
 				continue
 			}
+
 			todo = append(todo, bytes[n:])
 			todo = append(todo, buffers[i+1:]...)
 			break
@@ -216,32 +235,63 @@ func (c *Client) writeBuffers(buffers net.Buffers) error {
 	return nil
 }
 
+// ReadRoutine manages the connection singleton until closed.
 func (c *Client) readRoutine() {
-	// determine only here whether closed
+	// read routine determines ErrClosed
 	defer close(c.closed)
 
-	for {
-		r, err := c.connect()
-		switch err {
-		case nil:
-			for {
-				err := c.nextPacket(r)
-				if err == nil {
-					continue
-				}
-				if errors.Is(err, ErrClosed) {
-					return
-				}
-				log.Print(err)
+	c.connSem <- nil // causes ErrDown
+
+	for { // no connection
+		select {
+		default:
+			break
+		case <-c.quit:
+			return // honor request
+		}
+
+		conn, err := c.connect()
+		if err != nil {
+			delay := c.RetryDelay
+			log.Print("mqtt: connect retry in ", delay, " on ", err)
+			t := time.NewTimer(delay)
+			select {
+			case <-t.C:
+				continue // retry
+			case <-c.quit:
+				t.Stop()
+				return // honor request
+			}
+		}
+
+		// release connection for write
+		select {
+		case <-c.connSem:
+			// replace nil with new connection
+			c.connSem <- conn // won't block
+		case <-c.quit:
+			conn.Close() // don't leak
+			return       // honor request
+		}
+
+		// read packets until error
+		r := bufio.NewReader(conn)
+		for {
+			err := c.nextPacket(r)
+			if err != nil {
+				log.Print("mqtt: connection lost on ", err)
 				break
 			}
+		}
+		conn.Close()
 
-		case ErrClosed:
-			return
-
-		default:
-			log.Print(err)
-			time.Sleep(c.RetryDelay)
+		// recapture write
+		select {
+		case <-c.connSem: // lock
+			// replace closed connection with nil (for ErrDown)
+			c.connSem <- nil // won't block
+		case <-c.quit:
+			return // honor request
 		}
 	}
 }
@@ -582,7 +632,7 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 }
 
 // Connect initiates the transport layer and populates c.connSem.
-func (c *Client) connect() (*bufio.Reader, error) {
+func (c *Client) connect() (net.Conn, error) {
 	conn, err := c.Connecter()
 	if err != nil {
 		return nil, err
@@ -673,6 +723,7 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		conn.Close()
 		return nil, err
 	} else if head != connAck<<4 {
+		conn.Close()
 		return nil, fmt.Errorf("mqtt: received head %#x, want connect ␆—connection closed", head)
 	}
 
@@ -680,6 +731,7 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		conn.Close()
 		return nil, err
 	} else if remainingLen != 2 {
+		conn.Close()
 		return nil, fmt.Errorf("mqtt: connect ␆ remaining length is %d instead of 2—connection closed", remainingLen)
 	}
 
@@ -687,6 +739,7 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		conn.Close()
 		return nil, err
 	} else if flags > 1 {
+		conn.Close()
 		return nil, fmt.Errorf("mqtt: received reserved connect ␆ flags %#x—connection closed", flags)
 	}
 
@@ -694,16 +747,19 @@ func (c *Client) connect() (*bufio.Reader, error) {
 		conn.Close()
 		return nil, err
 	} else if r := connectReturn(code); r != accepted {
+		conn.Close()
 		return nil, r
 	}
 
-	return bufio.NewReaderSize(conn, 64), nil
+	return conn, nil
 }
 
 // Publish wires the message with QoS level 0—an “at most once” guarantee.
 // Subscribers may or may not receive the message when subject to error.
 // This fire-and-forget delivery is the most efficient option.
-// Multiple goroutines may invoke Publish similtaneously.
+//
+// Multiple goroutines may invoke Publish similtaneously,
+// regardless of any other invocations to the Client.
 func (c *Client) Publish(topic string, message []byte) error {
 	return c.publish(topic, message, pubMsg<<4|atMostOnce<<1)
 }
@@ -822,6 +878,11 @@ func (c *Client) persistAndTrySend(packetID uint, packet *packet, message []byte
 }
 
 // Subscribe requests a subscription for all topics that match any of the filters.
+//
+// Multiple goroutines may invoke Subscribe similtaneously,
+// regardless of any other invocations to the Client.
+// The method allows only one Subscribe request at a time,
+// blocking any later calls until complete.
 func (c *Client) Subscribe(topicFilters ...string) error {
 	if len(topicFilters) == 0 {
 		return nil
@@ -893,6 +954,11 @@ func (c *Client) Subscribe(topicFilters ...string) error {
 }
 
 // Unsubscribe requests a Subscribe cancelation.
+//
+// Multiple goroutines may invoke Unsubscribe similtaneously,
+// regardless of any other invocations to the Client.
+// The method allows only one Unsubscribe request at a time,
+// blocking any later calls until complete.
 func (c *Client) Unsubscribe(topicFilters ...string) error {
 	if len(topicFilters) == 0 {
 		return nil
@@ -945,13 +1011,17 @@ func (c *Client) Unsubscribe(topicFilters ...string) error {
 }
 
 // Ping makes a roundtrip to validate the connection.
+//
+// Multiple goroutines may invoke Ping similtaneously,
+// regardless of any other invocations to the Client.
+// The method allows only one Ping request at a time,
+// blocking any later calls until complete.
 func (c *Client) Ping() error {
 	ch := make(chan struct{})
 	c.pingAck <- ch // lock
 
 	if err := c.write(pingPacket.buf); err != nil {
 		<-c.pingAck // unlock
-		// TODO(pascaldekloe): Trigger reset
 		return err
 	}
 
@@ -959,8 +1029,92 @@ func (c *Client) Ping() error {
 	return nil
 }
 
-// Disconnect is a graceful termination, which also discards the Will.
-// The underlying connection is closed.
+// Disconnect tries a graceful termination, which discards the Will.
+// The Client is closed [Close] on return, regardless of any errors.
+//
+// Multiple goroutines may invoke Disconnect similtaneously,
+// regardless of any other invocations to the Client.
+// The method allows only one Disconnect request at a time,
+// blocking any later calls until complete.
+//
+// BUG(pascaldekloe): MQTT does not confirm reception of a disconnect
+// request. As a result, the caller can never know for sure whether a
+// Disconnect actually executed, even without error.
 func (c *Client) Disconnect() error {
-	return c.write(disconnPacket.buf)
+	select {
+	case c.quit <- struct{}{}:
+		var conn net.Conn
+
+		// The read routine signal is in place.
+		// Quit is only read when down though.
+		select {
+		case conn = <-c.connSem: // lock
+			if conn == nil {
+				// Down at the moment. The read routine can't
+				// release a new connection with connSem locked,
+				// thus we can await c.quit in a blocking manner
+				// here.
+				<-c.closed
+
+				c.connSem <- nil // release (won't block)
+
+				return ErrDown // disconnect request not send
+			}
+
+		case <-c.closed: // done
+			return nil
+		}
+
+		// ⚠️ delayed error return
+		_, err := conn.Write(disconnPacket.buf)
+
+		// “After sending a DISCONNECT Packet the Client MUST close the
+		// Network Connection."
+		// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-1
+		conn.Close() // interrupts the read routine
+
+		// “After sending a DISCONNECT Packet the Client MUST NOT send
+		// any more Control Packets on that Network Connection.”
+		// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
+
+		// The read routine can't release a new connection with connSem
+		// locked, thus we can await c.quit in a blocking manner here.
+		<-c.closed
+
+		c.connSem <- nil // release (won't block)
+
+		return err
+
+	case <-c.closed: // already closed
+		return ErrClosed
+	}
+}
+
+// Close terminates the Client (connection establishment).
+// Calling Close on an already closed Client has no effect.
+//
+// Multiple goroutines may invoke Close similtaneously,
+// regardless of any other invocations to the Client.
+func (c *Client) Close() error {
+	select {
+	case c.quit <- struct{}{}:
+		// read routine signal placed
+		select {
+		case conn := <-c.connSem: // lock
+			var closeErr error
+			if conn != nil {
+				// abort read (to pick up signal)
+				closeErr = conn.Close()
+			}
+			// don't release yet; prevent reconnect
+			<-c.closed       // blocking await confirm
+			c.connSem <- nil // release (won't block)
+			return closeErr
+		case <-c.closed: // done
+			return nil
+		}
+
+	case <-c.closed: // already closed
+		return nil
+	}
 }
