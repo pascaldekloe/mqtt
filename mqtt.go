@@ -8,22 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 )
-
-// Packet is an encoding buffer.
-type packet struct {
-	buf []byte
-}
 
 // Fixed Packets
 var (
-	pingPacket    = &packet{[]byte{ping << 4, 0}}
-	pongPacket    = &packet{[]byte{pong << 4, 0}}
-	disconnPacket = &packet{[]byte{disconn << 4, 0}}
+	pingPacket    = []byte{ping << 4, 0}
+	pongPacket    = []byte{pong << 4, 0}
+	disconnPacket = []byte{disconn << 4, 0}
 )
-
-var packetPool = sync.Pool{New: func() interface{} { return new(packet) }}
 
 const (
 	packetMax = 268_435_455 // 4-byte varint

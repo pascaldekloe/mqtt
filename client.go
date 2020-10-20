@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,8 @@ var ErrDown = errors.New("mqtt: connection unavailable")
 
 // ErrClosed signals use after Close.
 var ErrClosed = errors.New("mqtt: client closed")
+
+var bufPool = sync.Pool{New: func() interface{} { return new([256]byte) }}
 
 // Multiple goroutines may invoke methods on a ClientPool simultaneously.
 type ClientPool struct {
@@ -443,10 +446,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 
 		case atLeastOnce << 1:
 			if c.Receive(topic, message) {
-				p := packetPool.Get().(*packet)
-				defer packetPool.Put(p)
-				p.buf = append(p.buf[:0], pubAck<<4, 2, byte(packetID>>8), byte(packetID))
-				if err := c.write(p.buf); err != nil {
+				buf := bufPool.Get().(*[256]byte)
+				defer bufPool.Put(buf)
+				buf[0], buf[1], buf[2], buf[3] = pubAck<<4, 2, byte(packetID>>8), byte(packetID)
+				if err := c.write(buf[:4]); err != nil {
 					return err
 				}
 			}
@@ -461,10 +464,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 				return nil // don't confirm
 			}
 
-			p := packetPool.Get().(*packet)
-			defer packetPool.Put(p)
-			p.buf = append(p.buf[:0], pubReceived<<4, 2, byte(packetID>>8), byte(packetID))
-			if err := c.write(p.buf); err != nil {
+			buf := bufPool.Get().(*[256]byte)
+			defer bufPool.Put(buf)
+			buf[0], buf[1], buf[2], buf[3] = pubReceived<<4, 2, byte(packetID>>8), byte(packetID)
+			if err := c.write(buf[:4]); err != nil {
 				return err
 			}
 
@@ -496,10 +499,10 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			c.Persistence.Delete(packetID)
 		}
 
-		p := packetPool.Get().(*packet)
-		defer packetPool.Put(p)
-		p.buf = append(p.buf[:0], pubComplete<<4, 2, byte(packetID>>8), byte(packetID))
-		if err := c.write(p.buf); err != nil {
+		buf := bufPool.Get().(*[256]byte)
+		defer bufPool.Put(buf)
+		buf[0], buf[1], buf[2], buf[3] = pubComplete<<4, 2, byte(packetID>>8), byte(packetID)
+		if err := c.write(buf[:4]); err != nil {
 			return err
 		}
 
@@ -530,13 +533,14 @@ func (c *Client) inbound(firstByte uint, p []byte) error {
 			return err
 		}
 
-		p := packetPool.Get().(*packet)
-		p.buf = append(p.buf[:0], pubRelease<<4, 2, byte(packetID>>8), byte(packetID))
-		err = c.Persistence.Store(packetID, net.Buffers{p.buf})
+		buf := bufPool.Get().(*[256]byte)
+		defer bufPool.Put(buf)
+		buf[0], buf[1], buf[2], buf[3] = pubRelease<<4, 2, byte(packetID>>8), byte(packetID)
+		err = c.Persistence.Store(packetID, net.Buffers{buf[:4]})
 		if err != nil {
 			return err
 		}
-		if err := c.write(p.buf); err != nil {
+		if err := c.write(buf[:4]); err != nil {
 			return err
 		}
 
@@ -669,50 +673,52 @@ func (c *Client) connect() (net.Conn, error) {
 	}
 	size += 2 + len(c.ClientID)
 
-	p := packetPool.Get().(*packet)
+	buf := bufPool.Get().(*[256]byte)
+	defer bufPool.Put(buf)
+	packet := buf[:0]
 
 	// compose header
-	p.buf = append(p.buf[:0], connReq<<4)
+	packet = append(packet, connReq<<4)
 	for size > 127 {
-		p.buf = append(p.buf, byte(size|128))
+		packet = append(packet, byte(size|128))
 		size >>= 7
 	}
-	p.buf = append(p.buf[:0], byte(size))
+	packet = append(packet, byte(size))
 
-	p.buf = append(p.buf, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
+	packet = append(packet, 0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags))
 
 	// append payload
 	if err := stringCheck(c.ClientID); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	p.buf = append(p.buf, byte(len(c.ClientID)>>8), byte(len(c.ClientID)))
-	p.buf = append(p.buf, c.ClientID...)
+	packet = append(packet, byte(len(c.ClientID)>>8), byte(len(c.ClientID)))
+	packet = append(packet, c.ClientID...)
 
 	if c.Will.Topic != "" {
 		if err := stringCheck(c.Will.Topic); err != nil {
 			conn.Close()
 			return nil, err
 		}
-		p.buf = append(p.buf, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
-		p.buf = append(p.buf, c.Will.Topic...)
-		p.buf = append(p.buf, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
-		p.buf = append(p.buf, c.Will.Message...)
+		packet = append(packet, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
+		packet = append(packet, c.Will.Topic...)
+		packet = append(packet, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
+		packet = append(packet, c.Will.Message...)
 	}
 	if c.UserName != "" {
 		if err := stringCheck(c.UserName); err != nil {
 			conn.Close()
 			return nil, err
 		}
-		p.buf = append(p.buf, byte(len(c.UserName)>>8), byte(len(c.UserName)))
-		p.buf = append(p.buf, c.UserName...)
+		packet = append(packet, byte(len(c.UserName)>>8), byte(len(c.UserName)))
+		packet = append(packet, c.UserName...)
 	}
 	if c.Password != nil {
-		p.buf = append(p.buf, byte(len(c.Password)>>8), byte(len(c.Password)))
-		p.buf = append(p.buf, c.Password...)
+		packet = append(packet, byte(len(c.Password)>>8), byte(len(c.Password)))
+		packet = append(packet, c.Password...)
 	}
 
-	if _, err := conn.Write(p.buf); err != nil {
+	if _, err := conn.Write(packet); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -825,22 +831,24 @@ func (c *Client) publish(topic string, message []byte, head byte) error {
 		return errPacketMax
 	}
 
-	p := packetPool.Get().(*packet)
-	defer packetPool.Put(p)
-	p.buf = append(p.buf[:0], head)
-	for ; size > 127; size >>= 7 {
-		p.buf = append(p.buf, byte(size|128))
-	}
-	p.buf = append(p.buf, byte(size))
-	p.buf = append(p.buf, byte(len(topic)>>8), byte(len(topic)))
-	p.buf = append(p.buf, topic...)
+	buf := bufPool.Get().(*[256]byte)
+	defer bufPool.Put(buf)
+	packet := buf[:0]
 
-	return c.writeBuffers(net.Buffers{p.buf, message})
+	packet = append(packet, head)
+	for ; size > 127; size >>= 7 {
+		packet = append(packet, byte(size|128))
+	}
+	packet = append(packet, byte(size))
+	packet = append(packet, byte(len(topic)>>8), byte(len(topic)))
+	packet = append(packet, topic...)
+
+	return c.writeBuffers(net.Buffers{packet, message})
 }
 
 // Pubmsg returns a publish message start, without the packet identifier,
 // and without the payload.
-func pubmsg(topic string, message []byte, head byte) (*packet, error) {
+func pubmsg(topic string, message []byte, head byte) ([]byte, error) {
 	if err := stringCheck(topic); err != nil {
 		return nil, err
 	}
@@ -849,21 +857,23 @@ func pubmsg(topic string, message []byte, head byte) (*packet, error) {
 		return nil, errPacketMax
 	}
 
-	p := packetPool.Get().(*packet)
-	p.buf = append(p.buf[:0], head)
+	buf := bufPool.Get().(*[256]byte)
+	defer bufPool.Put(buf)
+	packet := buf[:0]
+
+	packet = append(packet, head)
 	for ; size > 127; size >>= 7 {
-		p.buf = append(p.buf, byte(size|128))
+		packet = append(packet, byte(size|128))
 	}
-	p.buf = append(p.buf, byte(size))
-	p.buf = append(p.buf, byte(len(topic)>>8), byte(len(topic)))
-	p.buf = append(p.buf, topic...)
-	return p, nil
+	packet = append(packet, byte(size))
+	packet = append(packet, byte(len(topic)>>8), byte(len(topic)))
+	packet = append(packet, topic...)
+	return packet, nil
 }
 
-func (c *Client) persistAndTrySend(packetID uint, packet *packet, message []byte) error {
-	defer packetPool.Put(packet)
-	packet.buf = append(packet.buf, byte(packetID>>8), byte(packetID))
-	buffers := net.Buffers{packet.buf, message}
+func (c *Client) persistAndTrySend(packetID uint, packet, message []byte) error {
+	packet = append(packet, byte(packetID>>8), byte(packetID))
+	buffers := net.Buffers{packet, message}
 
 	key := packetID | localPacketIDFlag
 	err := c.Persistence.Store(key, buffers)
@@ -900,32 +910,30 @@ func (c *Client) Subscribe(topicFilters ...string) error {
 		return errPacketMax
 	}
 
-	p := packetPool.Get().(*packet)
-	defer packetPool.Put(p)
-	if cap(p.buf) < size+5 {
-		p.buf = make([]byte, 0, size)
-	}
+	buf := bufPool.Get().(*[256]byte)
+	defer bufPool.Put(buf)
+	packet := buf[:0]
 
-	p.buf = append(p.buf[:0], subReq<<4)
+	packet = append(packet, subReq<<4)
 	for size > 127 {
-		p.buf = append(p.buf, byte(size|128))
+		packet = append(packet, byte(size|128))
 		size >>= 7
 	}
-	p.buf = append(p.buf, byte(size), 0, 1) // including subscriptionPacketID
+	packet = append(packet, byte(size), 0, 1) // including subscriptionPacketID
 	for _, s := range topicFilters {
-		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
-		p.buf = append(p.buf, s...)
-		p.buf = append(p.buf, exactlyOnce)
+		packet = append(packet, byte(len(s)>>8), byte(len(s)))
+		packet = append(packet, s...)
+		packet = append(packet, exactlyOnce)
 	}
 
 	returnCodes := make(chan byte, len(topicFilters))
 	c.subscriptionAck <- returnCodes // lock
-	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{p.buf})
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{packet})
 	if err != nil {
 		<-c.subscriptionAck // unlock
 		return err
 	}
-	if err := c.write(p.buf); err != nil {
+	if err := c.write(packet); err != nil {
 		panic("TODO(pascaldekloe): Trigger reset")
 	}
 
@@ -976,31 +984,29 @@ func (c *Client) Unsubscribe(topicFilters ...string) error {
 		return errPacketMax
 	}
 
-	p := packetPool.Get().(*packet)
-	defer packetPool.Put(p)
-	if cap(p.buf) < size+5 {
-		p.buf = make([]byte, 0, size)
-	}
+	buf := bufPool.Get().(*[256]byte)
+	defer bufPool.Put(buf)
+	packet := buf[:0]
 
-	p.buf = append(p.buf[:0], unsubReq<<4)
+	packet = append(packet, unsubReq<<4)
 	for size > 127 {
-		p.buf = append(p.buf, byte(size|128))
+		packet = append(packet, byte(size|128))
 		size >>= 7
 	}
-	p.buf = append(p.buf, byte(size), 0, 1) // including subscriptionPacketID
+	packet = append(packet, byte(size), 0, 1) // including subscriptionPacketID
 	for _, s := range topicFilters {
-		p.buf = append(p.buf, byte(len(s)>>8), byte(len(s)))
-		p.buf = append(p.buf, s...)
+		packet = append(packet, byte(len(s)>>8), byte(len(s)))
+		packet = append(packet, s...)
 	}
 
 	returnCodes := make(chan byte)
 	c.subscriptionAck <- returnCodes // lock
-	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{p.buf})
+	err := c.Persistence.Store(uint(subscriptionPacketID|localPacketIDFlag), net.Buffers{packet})
 	if err != nil {
 		<-c.subscriptionAck // unlock
 		return err
 	}
-	if err := c.write(p.buf); err != nil {
+	if err := c.write(packet); err != nil {
 		panic("TODO(pascaldekloe): Trigger reset")
 	}
 
@@ -1020,7 +1026,7 @@ func (c *Client) Ping() error {
 	ch := make(chan struct{})
 	c.pingAck <- ch // lock
 
-	if err := c.write(pingPacket.buf); err != nil {
+	if err := c.write(pingPacket); err != nil {
 		<-c.pingAck // unlock
 		return err
 	}
@@ -1066,7 +1072,7 @@ func (c *Client) Disconnect() error {
 		}
 
 		// ⚠️ delayed error return
-		_, err := conn.Write(disconnPacket.buf)
+		_, err := conn.Write(disconnPacket)
 
 		// “After sending a DISCONNECT Packet the Client MUST close the
 		// Network Connection."
