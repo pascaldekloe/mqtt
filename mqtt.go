@@ -113,10 +113,9 @@ type SessionConfig struct {
 	// connection terminates without a disconnect package.
 	Will struct {
 		// Destination for the message.
-		// The Will feature is disabled when empty.
 		Topic string
 
-		// Actual payload.
+		// The Will feature is disabled when nil.
 		Message []byte
 
 		// Persistence constraints.
@@ -129,6 +128,87 @@ type SessionConfig struct {
 
 	// Timeout in seconds or disabled when zero.
 	KeepAlive uint16
+}
+
+// Valid returns a protocol constraint violation, if any.
+func (c *SessionConfig) Valid() error {
+	if err := stringCheck(c.ClientID); err != nil {
+		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
+	}
+	if err := stringCheck(c.UserName); err != nil {
+		return fmt.Errorf("mqtt: illegal user name: %w", err)
+	}
+	if len(c.Password) > stringMax {
+		return fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
+	}
+	if c.Will.Message != nil {
+		// MQTT Version 3.1.1, conformance statement MQTT-3.1.3-10
+		if err := stringCheck(c.Will.Topic); err != nil {
+			return fmt.Errorf("mqtt: illegal will topic: %w", err)
+		}
+		if len(c.Will.Message) > stringMax {
+			return fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
+		}
+	}
+	return nil
+}
+
+func (c *SessionConfig) appendConnReq(dst []byte) []byte {
+	size := 6 + 1 + 1 + 2 // protocol name + protocol level + connect flags + keep alive
+	size += 2 + len(c.ClientID)
+	var flags uint
+	if c.UserName != "" {
+		size += 2 + len(c.UserName)
+		flags |= 1 << 7
+	}
+	if c.Password != nil {
+		size += 2 + len(c.Password)
+		flags |= 1 << 6
+	}
+	if c.Will.Message != nil {
+		size += 4 + len(c.Will.Topic) + len(c.Will.Message)
+		if c.Will.Retain {
+			flags |= 1 << 5
+		}
+		switch {
+		case c.Will.ExactlyOnce:
+			flags |= exactlyOnce << 3
+		case c.Will.AtLeastOnce:
+			flags |= atLeastOnce << 3
+		}
+		flags |= 1 << 2
+	}
+	if c.CleanSession {
+		flags |= 1 << 1
+	}
+
+	// encode packet
+	dst = append(dst, connReq<<4)
+	for size > 127 {
+		dst = append(dst, byte(size|128))
+		size >>= 7
+	}
+	dst = append(dst, byte(size),
+		0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags),
+		byte(c.KeepAlive>>8), byte(c.KeepAlive),
+		byte(len(c.ClientID)>>8), byte(len(c.ClientID)),
+	)
+	dst = append(dst, c.ClientID...)
+	if c.Will.Message != nil {
+		dst = append(dst, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
+		dst = append(dst, c.Will.Topic...)
+		dst = append(dst, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
+		dst = append(dst, c.Will.Message...)
+	}
+	if c.UserName != "" {
+		dst = append(dst, byte(len(c.UserName)>>8), byte(len(c.UserName)))
+		dst = append(dst, c.UserName...)
+	}
+	if c.Password != nil {
+		dst = append(dst, byte(len(c.Password)>>8), byte(len(c.Password)))
+		dst = append(dst, c.Password...)
+	}
+	return dst
 }
 
 // LocalPacketIDFlag marks the key in the a local address space.
