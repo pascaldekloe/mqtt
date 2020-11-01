@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 )
 
 // Fixed Packets
@@ -279,4 +280,61 @@ func (code connectReturn) Error() string {
 	default:
 		return fmt.Sprintf(refuse+"reserved return code %d", code)
 	}
+}
+
+// NewVolatile returns a new implementation, which lives in memory only.
+// On the bright side, all volatile operations are entirely error free.
+func NewVolatile() Persistence {
+	return &volatile{perKey: make(map[uint][]byte)}
+}
+
+type volatile struct {
+	sync.Mutex
+	perKey map[uint][]byte
+}
+
+// List implements the Persistence interface.
+func (m *volatile) Load(key uint) ([]byte, error) {
+	m.Lock()
+	defer m.Unlock()
+	return m.perKey[key], nil
+}
+
+// List implements the Persistence interface.
+func (m *volatile) Store(key uint, data net.Buffers) error {
+	var n int
+	for _, b := range data {
+		n += len(b)
+	}
+	buf := make([]byte, n)
+
+	i := 0
+	for _, b := range data {
+		copy(buf[i:], b)
+		i += len(b)
+	}
+
+	m.Lock()
+	defer m.Unlock()
+	m.perKey[key] = buf
+	return nil
+}
+
+// List implements the Persistence interface.
+func (m *volatile) Delete(key uint) error {
+	m.Lock()
+	defer m.Unlock()
+	delete(m.perKey, key)
+	return nil
+}
+
+// List implements the Persistence interface.
+func (m *volatile) List() (keys []uint, err error) {
+	m.Lock()
+	defer m.Unlock()
+	keys = make([]uint, 0, len(m.perKey))
+	for k := range m.perKey {
+		keys = append(keys, k)
+	}
+	return
 }
