@@ -61,12 +61,11 @@ var (
 	ErrMessageSize = errors.New("mqtt: message size exceeds 268,435,451 B minus UTF-8 length of topic name")
 )
 
-// Quality of Service (QoS) are defines as numeric levels.
+// Quality of Service (QoS) are defined as numeric levels.
 const (
-	atMostOnce   = iota // fire and forget
-	atLeastOnce         // network round trip + Persistence
-	exactlyOnce         // two network round trips + Persistence
-	reservedQoS3        // must not be used
+	atMostOnce  = iota // fire and forget
+	atLeastOnce        // network round trip + Persistence
+	exactlyOnce        // two network round trips + Persistence
 )
 
 // Control Packet Types
@@ -260,13 +259,13 @@ const (
 	ErrAuth
 )
 
-// Error honors the standard error interface.
+// Error implements the standard error interface.
 func (code connectReturn) Error() string {
 	const refuse = "mqtt: connection refused: "
 
 	switch code {
 	case accepted:
-		return "OK" // not an error
+		panic("connect return 0 [accepted] used as an error")
 	case ErrProto:
 		return refuse + "unacceptable protocol version"
 	case ErrClientID:
