@@ -19,16 +19,24 @@ var (
 )
 
 const (
-	packetMax = 268_435_455 // 4-byte varint
-	stringMax = 65535       // 16-bit size prefixes
+	// See MQTT Version 3.1.1, table 2.4: “Size of Remaining Length field”.
+	packetMax = 1<<(4*7) - 1 // 4-byte varint
+
+	// “Unless stated otherwise all UTF-8 encoded strings can have any
+	// length in the range 0 to 65535 bytes.”
+	// — MQTT Version 3.1.1, section 1.5.3
+	stringMax = 1<<16 - 1 // 16-bit size prefixes
 )
 
+// Validation errors are expected to be prefixed according to context.
 var (
-	errPacketMax = errors.New("mqtt: packet limit of 256 MiB exceeded")
-	errStringMax = errors.New("mqtt: string exceeds 65535 bytes")
+	// ErrPacketMax enforces packetMax.
+	errPacketMax = errors.New("packet payload exceeds 256 MiB")
+	// ErrStringMax enforces stringMax.
+	errStringMax = errors.New("string exceeds 64 KiB")
 
-	errUTF8 = errors.New("mqtt: invalid UTF-8 byte sequence")
-	errNull = errors.New("mqtt: string contains null characer")
+	errUTF8 = errors.New("invalid UTF-8 byte sequence")
+	errNull = errors.New("string contains null characer")
 )
 
 func stringCheck(s string) error {
@@ -37,7 +45,8 @@ func stringCheck(s string) error {
 	}
 	for _, r := range s {
 		// “The character data in a UTF-8 encoded string MUST be
-		// well-formed UTF-8 as defined by the Unicode specification …”
+		// well-formed UTF-8 as defined by the Unicode specification
+		// and restated in RFC 3629.”
 		// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-1
 		if r == '\uFFFD' {
 			return errUTF8
@@ -55,12 +64,6 @@ func stringCheck(s string) error {
 
 // ErrRequestLimit signals too many client requests.
 var ErrRequestLimit = errors.New("mqtt: maximum number of pending requests reached")
-
-// Protocol Constraints
-var (
-	ErrTopicName   = errors.New("mqtt: malformed topic name: null [U+0000] character, illegal UTF-8 sequence or size exceeds 64 kiB")
-	ErrMessageSize = errors.New("mqtt: message size exceeds 268,435,451 B minus UTF-8 length of topic name")
-)
 
 // Quality of Service (QoS) are defined as numeric levels.
 const (
@@ -107,6 +110,7 @@ type SessionConfig struct {
 	Password []byte
 
 	// Discard any previous session (on the server) and start a new one.
+	// Note that automated reconnects will use false only.
 	CleanSession bool
 
 	// Will is a message publication to be send when the
@@ -153,8 +157,12 @@ func (c *SessionConfig) Valid() error {
 	return nil
 }
 
+// AppendConnReq appends the CONNREQ packet to dst and returns the extended buffer.
 func (c *SessionConfig) appendConnReq(dst []byte) []byte {
-	size := 6 + 1 + 1 + 2 // protocol name + protocol level + connect flags + keep alive
+	size := 2 + 4 // protocol name
+	size += 1     // protocol level
+	size += 1     // connect flags
+	size += 2     // keep alive
 	size += 2 + len(c.ClientID)
 	var flags uint
 	if c.UserName != "" {
