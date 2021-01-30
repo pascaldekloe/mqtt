@@ -7,15 +7,24 @@ import (
 	"testing"
 )
 
-func TestAppendConnReq(t *testing.T) {
-	c := new(SessionConfig)
+func TestConstants(t *testing.T) {
+	if want := 268_435_455; packetMax != want {
+		t.Errorf("got packetMax %d, want %d", packetMax, want)
+	}
+	if want := 65_535; stringMax != want {
+		t.Errorf("got stringMax %d, want %d", stringMax, want)
+	}
+}
 
+func TestNewCONNREQ(t *testing.T) {
 	want := []byte{0x10, 12, 0, 4, 'M', 'Q', 'T', 'T', 4, 0, 0, 0, 0, 0}
-	if got := c.appendConnReq(nil); !bytes.Equal(got, want) {
-		t.Errorf("empty session config got %#x, want %#x", got, want)
+	if got, err := NewVolatileSessionConfig("").newCONNREQ(); err != nil {
+		t.Error("empty configuration got error:", err)
+	} else if !bytes.Equal(got, want) {
+		t.Errorf("empty configuration got %#x, want %#x", got, want)
 	}
 
-	c.ClientID = "#🤖"
+	c := NewVolatileSessionConfig("#🤖")
 	c.UserName = "me"
 	c.Password = []byte{'?'}
 	c.CleanSession = true
@@ -32,42 +41,44 @@ func TestAppendConnReq(t *testing.T) {
 		0, 3, 0xe2, 0x98, 0xa0,
 		0, 2, 'm', 'e',
 		0, 1, '?'}
-	if got := c.appendConnReq(nil); !bytes.Equal(got, want) {
+	if got, err := c.newCONNREQ(); err != nil {
+		t.Error("full configuration got error:", err)
+	} else if !bytes.Equal(got, want) {
 		t.Errorf("full session config got %#x, want %#x", got, want)
 	}
 }
 
 func TestPesistenceEmpty(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testPersistenceEmpty(t, NewVolatile())
+		testStoreEmpty(t, newVolatile(""))
 	})
 }
 
-func testPersistenceEmpty(t *testing.T, p Persistence) {
-	if data, err := p.Load(42); err != nil {
+func testStoreEmpty(t *testing.T, x Store) {
+	if data, err := x.Load(42); err != nil {
 		t.Error("Load got error:", err)
 	} else if data != nil {
 		t.Errorf("Load got %#x, want nil", data)
 	}
 
-	if err := p.Delete(42); err != nil {
+	if err := x.Delete(42); err != nil {
 		t.Error("Delete got error:", err)
 	}
 
-	if keys, err := p.List(); err != nil {
+	if keys, err := x.List(); err != nil {
 		t.Error("List got error:", err)
 	} else if len(keys) != 0 {
 		t.Errorf("List got keys %d", keys)
 	}
 }
 
-func TestPersistence(t *testing.T) {
+func TestStore(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testPersistence(t, NewVolatile())
+		testStore(t, newVolatile(""))
 	})
 }
 
-func testPersistence(t *testing.T, p Persistence) {
+func testStore(t *testing.T, x Store) {
 	for i := 0; i < 3; i++ {
 		bufs := make(net.Buffers, i+1)
 		for j := range bufs {
@@ -77,13 +88,13 @@ func testPersistence(t *testing.T, p Persistence) {
 			}
 		}
 
-		err := p.Store(uint(i), bufs)
+		err := x.Save(uint(i), bufs)
 		if err != nil {
 			t.Errorf("Store %d got error: %s", i, err)
 		}
 	}
 
-	if keys, err := p.List(); err != nil {
+	if keys, err := x.List(); err != nil {
 		t.Error("List got error:", err)
 	} else {
 		// order undefined
@@ -97,90 +108,90 @@ func testPersistence(t *testing.T, p Persistence) {
 		}
 	}
 
-	if data, err := p.Load(0); err != nil {
+	if data, err := x.Load(0); err != nil {
 		t.Error("Load 0 got error:", err)
 	} else if want := "a"; string(data) != want {
 		t.Errorf("Load 0 got %q, want %q", data, want)
 	}
-	if data, err := p.Load(1); err != nil {
+	if data, err := x.Load(1); err != nil {
 		t.Error("Load 1 got error:", err)
 	} else if want := "aab"; string(data) != want {
 		t.Errorf("Load 1 got %q, want %q", data, want)
 	}
-	if data, err := p.Load(2); err != nil {
+	if data, err := x.Load(2); err != nil {
 		t.Error("Load 2 got error:", err)
 	} else if want := "aababc"; string(data) != want {
 		t.Errorf("Load 2 got %q, want %q", data, want)
 	}
 }
 
-func TestPersistenceUpdate(t *testing.T) {
+func TestStoreUpdate(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testPersistenceUpdate(t, NewVolatile())
+		testStoreUpdate(t, newVolatile(""))
 	})
 }
 
-func testPersistenceUpdate(t *testing.T, p Persistence) {
-	err := p.Store(0, net.Buffers{[]byte("ab"), []byte("cd")})
+func testStoreUpdate(t *testing.T, x Store) {
+	err := x.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
 	if err != nil {
 		t.Fatal("Store new 0 got error:", err)
 	}
-	err = p.Store(42, net.Buffers{[]byte("ef")})
+	err = x.Save(42, net.Buffers{[]byte("ef")})
 	if err != nil {
 		t.Fatal("Store new 42 got error:", err)
 	}
-	err = p.Store(0, net.Buffers{[]byte("12")})
+	err = x.Save(0, net.Buffers{[]byte("12")})
 	if err != nil {
 		t.Fatal("Store update 0 got error:", err)
 	}
-	err = p.Store(42, net.Buffers{[]byte("34"), []byte("56")})
+	err = x.Save(42, net.Buffers{[]byte("34"), []byte("56")})
 	if err != nil {
 		t.Fatal("Store update 42 got error:", err)
 	}
 
-	if data, err := p.Load(0); err != nil {
+	if data, err := x.Load(0); err != nil {
 		t.Error("Load 0 got error:", err)
 	} else if want := "12"; string(data) != want {
 		t.Errorf("Load 0 got %#v, want %#v", data, want)
 	}
-	if data, err := p.Load(42); err != nil {
+	if data, err := x.Load(42); err != nil {
 		t.Error("Load 42 got error:", err)
 	} else if want := "3456"; string(data) != want {
 		t.Errorf("Load 42 got %#v, want %#v", data, want)
 	}
 }
 
-func TestPersistenceDelete(t *testing.T) {
+func TestStoreDelete(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testPersistenceDelete(t, NewVolatile())
+		testStoreDelete(t, newVolatile(""))
 	})
 }
 
-func testPersistenceDelete(t *testing.T, p Persistence) {
-	err := p.Store(0, net.Buffers{[]byte("ab"), []byte("cd")})
+func testStoreDelete(t *testing.T, x Store) {
+	err := x.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
 	if err != nil {
 		t.Fatal("Store new 0 got error:", err)
 	}
-	err = p.Store(42, net.Buffers{[]byte("ef")})
+	err = x.Save(42, net.Buffers{[]byte("ef")})
 	if err != nil {
 		t.Fatal("Store new 42 got error:", err)
 	}
-	err = p.Store(42, net.Buffers{[]byte("gh")})
+	err = x.Save(42, net.Buffers{[]byte("gh")})
 	if err != nil {
 		t.Fatal("Store update 42 got error:", err)
 	}
-	err = p.Store(99, net.Buffers{[]byte("ij")})
+	err = x.Save(99, net.Buffers{[]byte("ij")})
 	if err != nil {
 		t.Fatal("Store new 99 got error:", err)
 	}
 
-	if err := p.Delete(42); err != nil {
+	if err := x.Delete(42); err != nil {
 		t.Error("Delete 42 got error:", err)
 	}
-	if err := p.Delete(0); err != nil {
+	if err := x.Delete(0); err != nil {
 		t.Error("Delete 0 got error:", err)
 	}
-	if keys, err := p.List(); err != nil {
+	if keys, err := x.List(); err != nil {
 		t.Error("List got error:", err)
 	} else if len(keys) != 1 || keys[0] != 99 {
 		t.Errorf("List got %d, want %d", keys, []uint{99})
