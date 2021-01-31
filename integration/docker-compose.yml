@@ -1,0 +1,23 @@
+version: "3"
+services:
+  test:
+    image: golang:1.16-rc
+    volumes:
+      - ..:/code
+    command: /code/integration/docker.sh
+    environment:
+      - MQTT_HOSTS=emqx gmqtt hivemq mosquitto vernemq
+
+  emqx:
+    image: emqx/emqx:4.2.5
+  gmqtt:
+    image: gmqtt/gmqttd:v0.2.2
+  hivemq:
+    image: hivemq/hivemq4:4.4.4
+  mosquitto:
+    image: eclipse-mosquitto:1.6.12
+  vernemq:
+    image: vernemq/vernemq:1.10.4.1
+    environment:
+      - DOCKER_VERNEMQ_ACCEPT_EULA=yes
+      - DOCKER_VERNEMQ_ALLOW_ANONYMOUS=on
