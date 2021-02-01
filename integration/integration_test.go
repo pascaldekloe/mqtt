@@ -24,7 +24,6 @@ func TestRace(t *testing.T) {
 	for i := range hosts {
 		t.Run(hosts[i], func(t *testing.T) {
 			host := hosts[i]
-			t.Parallel()
 			t.Run("at-most-once", func(t *testing.T) {
 				t.Parallel()
 				race(t, host, 0)
@@ -50,12 +49,13 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	client := mqtt.NewClient(&mqtt.ClientConfig{
 		Connecter: mqtt.UnsecuredConnecter("tcp", net.JoinHostPort(host, "1883")),
 
-		SessionConfig: mqtt.NewVolatileSessionConfig(t.Name()),
+		SessionConfig:  mqtt.NewVolatileSessionConfig(t.Name()),
 		BufSize:        1024,
 		WireTimeout:    time.Second,
 		AtLeastOnceMax: testN,
 		ExactlyOnceMax: testN,
 	})
+	client.CleanSession = true
 
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
@@ -93,7 +93,7 @@ func race(t *testing.T, host string, deliveryLevel int) {
 
 			default:
 				t.Log("read error:", err)
-				time.Sleep(time.Second/8)
+				time.Sleep(time.Second / 8)
 				continue
 			}
 		}
