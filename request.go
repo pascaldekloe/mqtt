@@ -266,10 +266,6 @@ func (c *Client) onSUBACK() error {
 
 // Unsubscribe requests subscription cancelation for each of the filter
 // arguments.
-//
-// The request will continue if the return is a SendError. An ErrMax should be
-// retried with some backoff only. All other error return options imply illegal
-// invocation—the same arguments will produce the same error again.
 func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error {
 	if len(topicFilters) == 0 {
 		return errUnsubscribeNone

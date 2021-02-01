@@ -77,7 +77,7 @@ func ExampleNewClient() {
 
 // DemoClient returns a closed client.
 func demoClient() *mqtt.Client {
-	// The log lines serve as example explaination only.
+	// The log lines serve as example explanation only.
 	log.SetOutput(ioutil.Discard)
 
 	c := mqtt.NewClient(&mqtt.ClientConfig{

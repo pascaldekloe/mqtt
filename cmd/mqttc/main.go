@@ -200,7 +200,7 @@ func main() {
 			}
 		}
 
-		// gracefull shutdown
+		// graceful shutdown
 		ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
 		defer cancel()
 		err := client.Disconnect(ctx.Done())

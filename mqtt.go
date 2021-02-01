@@ -96,9 +96,10 @@ func stringCheck(s string) error {
 	return nil
 }
 
-// IsDeny returns whether the request was rejected by a Client based on
-// validation constraints. The rejection is permanent in such case. Another
-// invocation with the same arguments will result in the same error again.
+// IsDeny returns whether some request was rejected by a Client based on
+// validation constraints, such as size limitations and UTF-8 encodings.
+// The rejection is permanent in such case. Another invocation with the
+// same arguments will result in the same error again.
 func IsDeny(err error) bool {
 	for err != nil {
 		switch err {

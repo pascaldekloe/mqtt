@@ -7,7 +7,7 @@
 
 … an MQTT client library for the Go programming language. Great care was taken
 to provide correctness in all scenario, including the error states. Message
-transfers in both directions have zero-copy. All errors are propagated through
+transfers in both directions do zero-copy. All errors are propagated through
 the API—no internal logging.
 
 The development was kindly sponsored by [Northvolt](https://northvolt.com), as a

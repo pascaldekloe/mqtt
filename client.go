@@ -35,7 +35,7 @@ var ErrDown = errors.New("mqtt: connection unavailable")
 // Further invocation will again result in the same error.
 var ErrClosed = errors.New("mqtt: client closed")
 
-// ErrBrokerTerm signals connection loss for unkown reasons.
+// ErrBrokerTerm signals connection loss for unknown reasons.
 var errBrokerTerm = fmt.Errorf("mqtt: broker closed the connection (%w)", io.EOF)
 
 // ErrProtoReset signals illegal reception.
@@ -84,7 +84,7 @@ func SecuredConnecter(network, address string, config *tls.Config) Connecter {
 	}
 }
 
-// ClientConfig is a configuration for a Client.
+// ClientConfig is the configuration for a Client.
 // Clients can't share a configuration because they can't share the Store.
 type ClientConfig struct {
 	*SessionConfig
@@ -111,8 +111,8 @@ type ClientConfig struct {
 	AtLeastOnceMax, ExactlyOnceMax int
 }
 
-// Client manages a single network connection. A single goroutine must invoke
-// ReadSlices consequtively until ErrClosed. Some backoff in case of an error
+// Client manages a network connection. A single goroutine must invoke
+// ReadSlices consecutively until ErrClosed. Some backoff on error reception
 // comes recommended though.
 //
 // Multiple goroutines may invoke methods on a Conn simultaneously, except for
@@ -120,13 +120,13 @@ type ClientConfig struct {
 type Client struct {
 	ClientConfig // read-only
 
-	// The read routine controlls the connection, including reconnects.
+	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
 	r        *bufio.Reader // conn buffered
 	peek     []byte        // pending slice from bufio.Reader
 
-	// The semaphore locks connection controll. A nil entry implies no
-	// successfull connect yet.
+	// The semaphore locks connection control. A nil entry implies no
+	// successful connect yet.
 	connSem chan net.Conn
 
 	// The context is fed to the Connecter, which allows for faster aborts
@@ -165,7 +165,8 @@ type Client struct {
 	pendingAck [4]byte
 }
 
-// NewClient returns a new a Client with a copy of config.
+// NewClient returns a new Client. Configuration errors result in IsDeny on
+// ReadSlices.
 func NewClient(config *ClientConfig) *Client {
 	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > packetIDMask {
@@ -205,7 +206,7 @@ func NewClient(config *ClientConfig) *Client {
 // TermConn hijacks connection access. Further connect, write and writeAll
 // requests are denied with ErrClosed, regardless of the error return.
 func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
-	// terminate connection controll
+	// terminate connection control
 	c.connectCancel()
 	conn, ok := <-c.connSem
 	if !ok {
@@ -433,7 +434,7 @@ func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 		if err == nil { // OK
 			return nil
 		}
-		// Allow deadline expiry if at least one byte was transfered.
+		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
 		if n == 0 || !errors.As(err, &ne) || !ne.Timeout() {
 			return err
@@ -462,7 +463,7 @@ func writeAll(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error {
 		if err == nil { // OK
 			return nil
 		}
-		// Allow deadline expiry if at least one byte was transfered.
+		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
 		if n == 0 || !errors.As(err, &ne) || !ne.Timeout() {
 			return err
@@ -540,7 +541,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 		// TODO(pascaldekloe): if errors.Is(err, bufio.ErrBufferFull) {
 		//	return head, BigPacketError{c, io.MultiReader(bytes.NewReader(c.peek), io.LimitReader(c.r, l-len(c.peek)))}
 
-		// Allow deadline expiry if at least one byte was transfered.
+		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
 		if len(c.peek) > lastN && errors.As(err, &ne) && ne.Timeout() {
 			continue
@@ -562,7 +563,7 @@ func (c *Client) connect() error {
 	}
 
 	// The semaphores wont block with a closed connection.
-	oldConn, ok := <-c.connSem // locks connection controll
+	oldConn, ok := <-c.connSem // locks connection control
 	if !ok {
 		return ErrClosed
 	}
