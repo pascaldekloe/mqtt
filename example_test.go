@@ -17,6 +17,28 @@ import (
 // Publish is a method from mqtt.Client.
 var Publish func(message []byte, topic string) error
 
+// PublishAtLeastOnce is a method from mqtt.Client.
+var PublishAtLeastOnce func(message []byte, topic string, ack chan<- error) error
+
+// Subscribe is a method from mqtt.Client.
+var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
+
+func init() {
+	// The log lines serve as example explanation only.
+	log.SetOutput(ioutil.Discard)
+
+	c := mqtt.NewClient(&mqtt.ClientConfig{
+		SessionConfig: mqtt.NewVolatileSessionConfig("demo"),
+		Connecter: func(context.Context) (net.Conn, error) {
+			return nil, errors.New("won't connect demo client")
+		},
+	})
+	c.Close()
+
+	PublishAtLeastOnce = c.PublishAtLeastOnce
+	Subscribe = c.Subscribe
+}
+
 // It is good practice to setup the client in main.
 func ExampleNewClient() {
 	client := mqtt.NewClient(&mqtt.ClientConfig{
@@ -37,6 +59,8 @@ func ExampleNewClient() {
 
 			case errors.Is(err, mqtt.ErrClosed):
 				return // terminated
+			case mqtt.IsDeny(err):
+				log.Fatal(err) // faulty configuration
 
 			default:
 				log.Print("MQTT unavailable: ", err)
@@ -75,46 +99,13 @@ func ExampleNewClient() {
 	// Output:
 }
 
-// DemoClient returns a closed client.
-func demoClient() *mqtt.Client {
-	// The log lines serve as example explanation only.
-	log.SetOutput(ioutil.Discard)
-
-	c := mqtt.NewClient(&mqtt.ClientConfig{
-		Connecter: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("won't connect demo client")
-		},
-	})
-	go c.Close()
-	for {
-		time.Sleep(10 * time.Millisecond)
-		_, _, err := c.ReadSlices()
-		if errors.Is(err, mqtt.ErrClosed) {
-			return c
-		}
-	}
-}
-
 func ExampleClient_PublishAtLeastOnce() {
-	MQTT := demoClient()
-
-	ack := make(chan error, 1) // must buffer
+	ack := make(chan error, 2) // must buffer
 	for {
-		err := MQTT.PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert", ack)
+		err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert", ack)
 		switch {
 		case err == nil:
 			log.Print("alert submitted")
-			for err := range ack {
-				if errors.Is(err, mqtt.ErrClosed) {
-					log.Print("🚨 alert suspended: ", err)
-					// Submission will continue when the Client
-					// is restarted with the same Store again.
-					return
-				}
-				log.Print("⚠️ alert delay: ", err)
-			}
-			log.Print("alert confirmed")
-			return
 
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			log.Print("🚨 alert not send: ", err)
@@ -124,20 +115,32 @@ func ExampleClient_PublishAtLeastOnce() {
 			backoff := time.Second
 			log.Printf("⚠️ alert retry in %s on: %s", backoff, err)
 			time.Sleep(backoff)
+			continue
 		}
+
+		for err := range ack {
+			if errors.Is(err, mqtt.ErrClosed) {
+				log.Print("🚨 alert suspended: ", err)
+				// Submission will continue when the Client
+				// is restarted with the same Store again.
+				return
+			}
+			log.Print("⚠️ alert delay: ", err)
+		}
+		log.Print("alert confirmed")
+		return
 	}
 	// Output:
 }
 
 // Demo various error scenario and how to act uppon them.
 func ExampleClient_Subscribe_context() {
-	MQTT := demoClient()
 	const topicFilter = "demo/+"
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	for {
-		err := MQTT.Subscribe(ctx.Done(), topicFilter)
+		err := Subscribe(ctx.Done(), topicFilter)
 		switch {
 		case err == nil:
 			log.Printf("subscribed to %q", topicFilter)
@@ -149,12 +152,13 @@ func ExampleClient_Subscribe_context() {
 			log.Print("subscribe state unknown: ", ctx.Err())
 			return
 		default:
-			backoff := time.Second
-			log.Printf("subscribe retry in %s: %s", backoff, err)
+			log.Printf("subscribe retry on: %s", err)
+			backoff := time.NewTimer(time.Second)
 			select {
-			case <-time.After(backoff):
+			case <-backoff.C:
 				continue
 			case <-ctx.Done():
+				backoff.Stop()
 				log.Print("subscribe abort: ", ctx.Err())
 				return
 			}
