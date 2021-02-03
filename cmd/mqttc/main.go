@@ -168,7 +168,7 @@ func main() {
 			switch {
 			case err == nil, errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
 				return // OK
-			case errors.Is(err, mqtt.ErrAbort):
+			case errors.Is(err, mqtt.ErrAbandon):
 				log.Fatal(name, ": subscribe timeout")
 
 				fallthrough
@@ -189,7 +189,7 @@ func main() {
 				break // OK
 			case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
 				return
-			case errors.Is(err, mqtt.ErrAbort):
+			case errors.Is(err, mqtt.ErrAbandon):
 				log.Print(name, ": ping timeout")
 
 				fallthrough

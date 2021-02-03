@@ -162,7 +162,7 @@ func TestSubscribe(t *testing.T) {
 		2, // max QOS
 	}))
 
-	sendPacketHex(t, conn, "900440000102") // SUBACK
+	sendPacketHex(t, conn, "900460000102") // SUBACK
 }
 
 func TestPublish(t *testing.T) {
