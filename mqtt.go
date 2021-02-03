@@ -321,9 +321,10 @@ const (
 	// Packet identifier zero is not in use by the protocol.
 	clientIDKey = 0
 
-	// The most-significant bit distinguishes between local and the remote registry.
-	localPacketIDSpace  = 0 << 16
-	remotePacketIDSpace = 1 << 16
+	// Packet identifiers on outbound and inbound requests each have their
+	// own namespace. The most-significant bit on a Store key makes the
+	// distinction.
+	remoteIDKeyFlag = 1 << 16
 )
 
 // Store defines session persistence for a Client.

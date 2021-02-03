@@ -14,8 +14,9 @@ import (
 // The plain Publish has no limit though.
 var ErrMax = errors.New("mqtt: maximum number of pending requests reached")
 
-// ErrAbort signals reception on a quit channel after sending the request.
-var ErrAbort = errors.New("mqtt: request aborted while awaiting response")
+// ErrAbandon gives up on a pending request. Quit channel reception may cause
+// ErrAbandon on the ack(nowledge) channel.
+var ErrAbandon = errors.New("mqtt: request abandoned while awaiting response")
 
 // BufSize should fit topic names with a bit of overhead.
 const bufSize = 128
@@ -51,7 +52,7 @@ func (c *Client) Ping(quit <-chan struct{}) error {
 	case <-quit:
 		select {
 		case <-c.pingAck: // unlock
-			return ErrAbort
+			return ErrAbandon
 		default: // picked up in mean time
 			return <-ch
 		}
@@ -71,6 +72,15 @@ func (c *Client) onPINGRESP() error {
 	return nil
 }
 
+// SubscribeError holds one or more topic filters which were failed by the broker.
+// The element order matches the originating request's.
+type SubscribeError []string
+
+// Error implements the standard error interface.
+func (e SubscribeError) Error() string {
+	return fmt.Sprintf("mqtt: broker failed %d topic filters", len(e))
+}
+
 // Reject no-ops to prevent programming mistakes.
 var (
 	// “The payload of a SUBSCRIBE packet MUST contain at least one
@@ -86,62 +96,97 @@ var (
 	errUnsubscribeNone = errors.New("mqtt: UNSUBSCRIBE without topic filters denied")
 )
 
-// SubscribeError holds one or more topic filters which were failed by the broker.
-// The element order matches the originating request's.
-type SubscribeError []string
+// A total for four types of client requests require a 16-bit packet identifier,
+// namely SUBSCRIBE, UNSUBSCRIBE and PUBLISH at-least-once or exactly-once.
+// The outbound identifiers are assigned in segments per type. The non-zero
+// prefixes/spaces also prevent use of the reserved packet identifier zero.
+const (
+	// A 14-bit address space allows for up to 16,384 pending transactions.
+	publishIDMask = 0x3fff
+	// The most-significant bit flags an ordered transaction for publish.
+	// The second most-significant bit distinguises the QOS level.
+	atLeastOnceIDSpace = 0x8000
+	exactlyOnceIDSpace = 0xc000
 
-// Error implements the standard error interface.
-func (e SubscribeError) Error() string {
-	return fmt.Sprintf("mqtt: broker failed %d topic filters", len(e))
-}
+	// A 13-bit address space allows for up to 8,192 pending transactions.
+	unorderedIDMask    = 0x1fff
+	subscribeIDSpace   = 0x6000
+	unsubscribeIDSpace = 0x4000
+)
 
-type subscription struct {
+// ErrPacketIDSpace signals a response packet with an identifier outside of the
+// respective address spaces, defined by subscribeIDSpace, unsubscribeIDSpace,
+// atLeastOnceIDSpace and exactlyOnceIDSpace. This extra check has a potential
+// to detect corruptions which would otherwise go unnoticed.
+var errPacketIDSpace = fmt.Errorf("%w: packet ID space mismatch", errProtoReset)
+
+// UnorderedTxs tracks outbound transactions without sequence contraints.
+type unorderedTxs struct {
 	sync.Mutex
-	n       uint                             // counter is allowed to overflow
-	transit map[uint16]*subscriptionCallback // topic filters per packet identifier
+	n           uint                         // counter is permitted to overflow
+	perPacketID map[uint16]unorderedCallback // transit state
 }
 
-type subscriptionCallback struct {
+type unorderedCallback struct {
 	done         chan<- error
 	topicFilters []string
 }
 
-func (subs *subscription) startTx(done chan<- error, topicFilters []string) (packetID uint16, err error) {
-	subs.Lock()
-	defer subs.Unlock()
-	// apply arbitrary high limit
-	if len(subs.transit) > 255 {
-		return 0, ErrMax
+// StartTx assigns a slot for either a subscribe or an unsubscribe.
+// The filter slice is nil for unsubscribes only.
+func (txs *unorderedTxs) startTx(topicFilters []string) (packetID uint16, done <-chan error, err error) {
+	var space uint
+	if topicFilters == nil {
+		space = unsubscribeIDSpace
+	} else {
+		space = subscribeIDSpace
 	}
+
+	// Only one response error can be applied on done.
+	ch := make(chan error, 1)
+
+	txs.Lock()
+	defer txs.Unlock()
+
+	// By using only a small window of the actual space we
+	// minimise any overlap risks with ErrAbandon cases.
+	if len(txs.perPacketID) > unorderedIDMask>>4 {
+		return 0, nil, ErrMax
+	}
+
+	// Find a free identifier with the sequence counter.
 	for {
-		packetID = uint16(subs.n&packetIDMask | subscriptionIDSpace)
-		subs.n++
-		if _, ok := subs.transit[packetID]; ok {
-			continue // pick another identifier
+		packetID = uint16(txs.n&unorderedIDMask | space)
+		txs.n++
+		if c, ok := txs.perPacketID[packetID]; ok {
+			c.done <- ErrAbandon
+			delete(txs.perPacketID, packetID)
+			// Skip the identifier for now minimise the chance of
+			// collision with a very very late response.
+			continue
 		}
-		subs.transit[packetID] = &subscriptionCallback{
+		txs.perPacketID[packetID] = unorderedCallback{
 			topicFilters: topicFilters,
-			done:         done,
+			done:         ch,
 		}
-		return packetID, nil
+		return packetID, ch, nil
 	}
 }
 
-// EndTx releases the packet identifier.
-// The caller must either send to done (or resubmit with startTx).
-func (subs *subscription) endTx(packetID uint16) (done chan<- error, topicFilters []string) {
-	subs.Lock()
-	defer subs.Unlock()
-	callback := subs.transit[packetID]
-	delete(subs.transit, packetID)
+// EndTx releases a slot. The filter slice is nil for unsubscribe requests.
+func (txs *unorderedTxs) endTx(packetID uint16) (done chan<- error, topicFilters []string) {
+	txs.Lock()
+	defer txs.Unlock()
+	callback := txs.perPacketID[packetID]
+	delete(txs.perPacketID, packetID)
 	return callback.done, callback.topicFilters
 }
 
-func (subs *subscription) close() {
-	subs.Lock()
-	defer subs.Unlock()
-	for packetID, callback := range subs.transit {
-		delete(subs.transit, packetID)
+func (txs *unorderedTxs) close() {
+	txs.Lock()
+	defer txs.Unlock()
+	for packetID, callback := range txs.perPacketID {
+		delete(txs.perPacketID, packetID)
 		callback.done <- ErrClosed
 	}
 }
@@ -149,22 +194,22 @@ func (subs *subscription) close() {
 // Subscribe requests subscription for all topics that match any of the filter
 // arguments.
 func (c *Client) Subscribe(quit <-chan struct{}, topicFilters ...string) error {
-	return c.subscribeQOS(quit, topicFilters, exactlyOnceLevel)
+	return c.subscribeLevel(quit, topicFilters, exactlyOnceLevel)
 }
 
 // SubscribeLimitAtMostOnce is like Subscribe, but limits the message reception
 // to quality-of-service level 0: fire-and-forget.
 func (c *Client) SubscribeLimitAtMostOnce(quit <-chan struct{}, topicFilters ...string) error {
-	return c.subscribeQOS(quit, topicFilters, atMostOnceLevel)
+	return c.subscribeLevel(quit, topicFilters, atMostOnceLevel)
 }
 
 // SubscribeLimitAtLeastOnce is like Subscribe, but limits the message reception
 // to quality-of-service level 1: acknowledged transfer.
 func (c *Client) SubscribeLimitAtLeastOnce(quit <-chan struct{}, topicFilters ...string) error {
-	return c.subscribeQOS(quit, topicFilters, atLeastOnceLevel)
+	return c.subscribeLevel(quit, topicFilters, atLeastOnceLevel)
 }
 
-func (c *Client) subscribeQOS(quit <-chan struct{}, topicFilters []string, levelMax byte) error {
+func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, levelMax byte) error {
 	if len(topicFilters) == 0 {
 		return errSubscribeNone
 	}
@@ -179,17 +224,15 @@ func (c *Client) subscribeQOS(quit <-chan struct{}, topicFilters []string, level
 		return fmt.Errorf("mqtt: SUBSCRIBE request denied: %w", errPacketMax)
 	}
 
-	// start transaction
-	done := make(chan error, 1)
-	packetID, err := c.subscription.startTx(done, topicFilters)
+	// slot assignment
+	packetID, done, err := c.unorderedTxs.startTx(topicFilters)
 	if err != nil {
 		return err
 	}
 
-	// compose request
+	// request packet composition
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
-	// header
 	packet := append(buf[:0], typeSUBSCRIBE<<4|atLeastOnceLevel<<1)
 	l := uint(size)
 	for ; l > 0x7f; l >>= 7 {
@@ -197,24 +240,23 @@ func (c *Client) subscribeQOS(quit <-chan struct{}, topicFilters []string, level
 	}
 	packet = append(packet, byte(l))
 	packet = append(packet, byte(packetID>>8), byte(packetID))
-	// payload
 	for _, s := range topicFilters {
 		packet = append(packet, byte(len(s)>>8), byte(len(s)))
 		packet = append(packet, s...)
 		packet = append(packet, levelMax)
 	}
 
-	// submit
+	// network submission
 	if err = c.write(packet); err != nil {
-		c.subscription.endTx(packetID)
+		c.unorderedTxs.endTx(packetID) // releases slot
 		return err
 	}
 	select {
 	case err := <-done:
 		return err
 	case <-quit:
-		c.subscription.endTx(packetID)
-		return ErrAbort
+		c.unorderedTxs.endTx(packetID) // releases slot
+		return ErrAbandon
 	}
 }
 
@@ -223,43 +265,50 @@ func (c *Client) onSUBACK() error {
 		return fmt.Errorf("%w: SUBACK with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := binary.BigEndian.Uint16(c.peek)
-	if packetID == 0 {
-		return errPacketIDZero
-	}
-	done, topicFilters := c.subscription.endTx(packetID)
 	switch {
-	case done == nil:
-		return nil // tolerate wandering SUBACK
+	case packetID == 0:
+		return errPacketIDZero
+	case packetID&^unorderedIDMask != subscribeIDSpace:
+		return errPacketIDSpace
+	}
+
+	returnCodes := c.peek[2:]
+	var failN int
+	for _, code := range returnCodes {
+		switch code {
+		case atMostOnceLevel, atLeastOnceLevel, exactlyOnceLevel:
+			break
+		case 0x80:
+			failN++
+		default:
+			return fmt.Errorf("%w: SUBACK with illegal return code %#02x", errProtoReset, code)
+		}
+	}
+
+	// commit
+	done, topicFilters := c.unorderedTxs.endTx(packetID)
+	if done == nil { // hopefully due ErrAbandon
+		return nil
+	}
 
 	// “The SUBACK Packet sent by the Server to the Client MUST contain a
 	// return code for each Topic Filter/QoS pair. …”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.8.4-5
-	case len(topicFilters) == len(c.peek)-2:
-		break
-
-	default:
-		return fmt.Errorf("%w: SUBACK with %d return codes, requested %d topic filters", errProtoReset, len(c.peek)-2, len(topicFilters))
+	if len(topicFilters) != len(returnCodes) {
+		done <- fmt.Errorf("mqtt: %d return codes for SUBSCRIBE with %d topic filters", len(returnCodes), len(topicFilters))
+		return errProtoReset
 	}
 
-	var err SubscribeError
-	for i, returnCode := range c.peek[2:] {
-		// “The order of Reason Codes in the SUBACK packet MUST match
-		// the order of Topic Filters in the SUBSCRIBE packet.”
-		// — MQTT Version 3.1.1, conformance statement MQTT-3.9.3-1
-		switch returnCode {
-		case atMostOnceLevel, atLeastOnceLevel, exactlyOnceLevel:
-			break // assumes correct level
-		case 0x80:
-			err = append(err, topicFilters[i])
-		default:
-			return fmt.Errorf("%w: SUBACK with illegal return code %#02x", errProtoReset, returnCode)
-		}
-	}
-
-	if len(err) != 0 {
-		done <- err
-	} else {
+	if failN == 0 {
 		close(done)
+	} else {
+		var err SubscribeError
+		for i, code := range returnCodes {
+			if code == 0x80 {
+				err = append(err, topicFilters[i])
+			}
+		}
+		done <- err
 	}
 	return nil
 }
@@ -281,14 +330,13 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 		return fmt.Errorf("mqtt: UNSUBSCRIBE request denied: %w", errPacketMax)
 	}
 
-	// start transaction
-	done := make(chan error, 1)
-	packetID, err := c.subscription.startTx(done, topicFilters)
+	// slot assignment
+	packetID, done, err := c.unorderedTxs.startTx(nil)
 	if err != nil {
 		return err
 	}
 
-	// compose request packet
+	// request packet composition
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
 	// header
@@ -305,17 +353,17 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 		packet = append(packet, s...)
 	}
 
-	// submit
+	// network submission
 	if err = c.write(packet); err != nil {
-		c.subscription.endTx(packetID)
+		c.unorderedTxs.endTx(packetID) // releases slot
 		return err
 	}
 	select {
 	case err := <-done:
 		return err
 	case <-quit:
-		c.subscription.endTx(packetID)
-		return ErrAbort
+		c.unorderedTxs.endTx(packetID) // releases slot
+		return ErrAbandon
 	}
 }
 
@@ -324,19 +372,22 @@ func (c *Client) onUNSUBACK() error {
 		return fmt.Errorf("%w: UNSUBACK with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := binary.BigEndian.Uint16(c.peek)
-	if packetID == 0 {
+	switch {
+	case packetID == 0:
 		return errPacketIDZero
+	case packetID&^unorderedIDMask != subscribeIDSpace:
+		return errPacketIDSpace
 	}
-	done, _ := c.subscription.endTx(packetID)
+	done, _ := c.unorderedTxs.endTx(packetID)
 	if done != nil {
 		close(done)
 	}
 	return nil
 }
 
-// TxOut tracks outbound transactions.
+// OrderedTxs tracks outbound transactions with sequence constraints.
 // The counters are allowed to overflow.
-type txOut struct {
+type orderedTxs struct {
 	Acked     uint // confirm count for PublishAtLeastOnce
 	Received  uint // confirm count 1/2 for PublishExactlyOnce
 	Completed uint // confirm count 2/2 for PublishExactlyOnce
@@ -409,7 +460,7 @@ func (c *Client) publishAtLeastOnceRetained(message []byte, topic string, ack ch
 		c.exactlyOnceSem <- counter
 		return ErrMax
 	}
-	err := c.publishPersisted(message, topic, counter&packetIDMask|atLeastOnceIDSpace, atLeastOnceLevel<<1|flags, ack, c.ackQ, &counter)
+	err := c.publishPersisted(message, topic, counter&publishIDMask|atLeastOnceIDSpace, atLeastOnceLevel<<1|flags, ack, c.ackQ, &counter)
 	c.atLeastOnceSem <- counter
 	return err
 }
@@ -423,7 +474,7 @@ func (c *Client) publishExactlyOnceRetained(message []byte, topic string, ack ch
 		c.exactlyOnceSem <- counter
 		return ErrMax
 	}
-	err := c.publishPersisted(message, topic, counter&packetIDMask|exactlyOnceIDSpace, exactlyOnceLevel<<1|flags, ack, c.recQ, &counter)
+	err := c.publishPersisted(message, topic, counter&publishIDMask|exactlyOnceIDSpace, exactlyOnceLevel<<1|flags, ack, c.recQ, &counter)
 	c.exactlyOnceSem <- counter
 	return err
 }
@@ -478,7 +529,7 @@ func (c *Client) publishPersisted(message []byte, topic string, packetID uint, f
 	head = append(head, byte(packetID>>8), byte(packetID))
 	packet := net.Buffers{head, message}
 
-	err := c.Store.Save(packetID|localPacketIDSpace, packet)
+	err := c.Store.Save(packetID, packet)
 	if err != nil {
 		return err
 	}
@@ -504,26 +555,29 @@ func (c *Client) onPUBACK() error {
 	if len(c.peek) != 2 {
 		return fmt.Errorf("%w: PUBACK with %d byte remaining length", errProtoReset, len(c.peek))
 	}
-	packetID := uint(binary.BigEndian.Uint16(c.peek))
-	if packetID == 0 {
+	packetID := binary.BigEndian.Uint16(c.peek)
+	switch {
+	case packetID == 0:
 		return errPacketIDZero
-	}
-	if len(c.ackQ) == 0 {
-		return fmt.Errorf("%w: wandering PUBACK %#04x", errProtoReset, packetID)
+	case packetID&^publishIDMask != atLeastOnceIDSpace:
+		return errPacketIDSpace
 	}
 
 	// match identifier
-	expect := c.txOut.Acked&packetIDMask | atLeastOnceIDSpace
-	if packetID != expect {
+	if len(c.ackQ) == 0 {
+		return nil // tolerates wandering PUBACK
+	}
+	expect := c.orderedTxs.Acked&publishIDMask | atLeastOnceIDSpace
+	if expect != uint(packetID) {
 		return fmt.Errorf("mqtt: PUBACK %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.ackQ))
 	}
 
 	// ceil transaction
-	err := c.Store.Delete(packetID | localPacketIDSpace)
+	err := c.Store.Delete(uint(packetID))
 	if err != nil {
 		return err // causes resubmission of PUBLISH
 	}
-	c.txOut.Acked++
+	c.orderedTxs.Acked++
 	ack := <-c.ackQ
 	if ack != nil {
 		close(ack)
@@ -537,28 +591,31 @@ func (c *Client) onPUBREC() error {
 	if len(c.peek) != 2 {
 		return fmt.Errorf("%w: PUBREC with %d byte remaining length", errProtoReset, len(c.peek))
 	}
-	packetID := uint(binary.BigEndian.Uint16(c.peek))
-	if packetID == 0 {
+	packetID := binary.BigEndian.Uint16(c.peek)
+	switch {
+	case packetID == 0:
 		return errPacketIDZero
-	}
-	if len(c.recQ) == 0 {
-		return fmt.Errorf("%w: wandering PUBREC %#04x", errProtoReset, packetID)
+	case packetID&^publishIDMask != exactlyOnceIDSpace:
+		return errPacketIDSpace
 	}
 
 	// match identifier
-	expect := c.txOut.Received&packetIDMask | exactlyOnceIDSpace
-	if packetID != expect {
+	if len(c.recQ) == 0 {
+		return nil // tolerates wandering PUBREC
+	}
+	expect := c.orderedTxs.Received&publishIDMask | exactlyOnceIDSpace
+	if uint(packetID) != expect {
 		return fmt.Errorf("mqtt: PUBREC %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.recQ))
 	}
 
 	// ceil receive with progress to release
 	c.pendingAck[0], c.pendingAck[1] = typePUBREL<<4|atLeastOnceLevel<<1, 2
 	c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
-	err := c.Store.Save(packetID|localPacketIDSpace, net.Buffers{c.pendingAck[:4]})
+	err := c.Store.Save(uint(packetID), net.Buffers{c.pendingAck[:4]})
 	if err != nil {
 		return err // causes resubmission of PUBLISH (from persistence)
 	}
-	c.txOut.Received++
+	c.orderedTxs.Received++
 	c.compQ <- <-c.recQ
 
 	// errors cause resubmission of PUBREL (from persistence)
@@ -577,25 +634,28 @@ func (c *Client) onPUBCOMP() error {
 		return fmt.Errorf("%w: PUBCOMP with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := uint(binary.BigEndian.Uint16(c.peek))
-	if packetID == 0 {
+	switch {
+	case packetID == 0:
 		return errPacketIDZero
-	}
-	if len(c.compQ) == 0 {
-		return nil // tolerate wandering PUBCOMP
+	case packetID&^publishIDMask != exactlyOnceIDSpace:
+		return errPacketIDSpace
 	}
 
 	// match identifier
-	expect := c.txOut.Completed&packetIDMask | exactlyOnceIDSpace
-	if packetID != expect {
+	if len(c.compQ) == 0 {
+		return nil // tolerates wandering PUBCOMP
+	}
+	expect := c.orderedTxs.Completed&publishIDMask | exactlyOnceIDSpace
+	if uint(packetID) != expect {
 		return fmt.Errorf("mqtt: PUBCOMP %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.compQ))
 	}
 
 	// ceil transaction
-	err := c.Store.Delete(packetID | localPacketIDSpace)
+	err := c.Store.Delete(uint(packetID))
 	if err != nil {
 		return err // causes resubmission of PUBREL (from persistence)
 	}
-	c.txOut.Completed++
+	c.orderedTxs.Completed++
 	ack := <-c.compQ
 	if ack != nil {
 		close(ack)

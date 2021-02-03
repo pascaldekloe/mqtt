@@ -148,7 +148,7 @@ func ExampleClient_Subscribe_context() {
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			log.Print("no subscribe: ", err)
 			return
-		case errors.Is(err, mqtt.ErrAbort):
+		case errors.Is(err, mqtt.ErrAbandon):
 			log.Print("subscribe state unknown: ", ctx.Err())
 			return
 		default:

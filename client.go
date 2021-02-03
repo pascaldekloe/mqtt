@@ -13,20 +13,6 @@ import (
 	"time"
 )
 
-// A total for four types of client requests require a 16-bit packet identifier,
-// namely SUBSCRIBE, UNSUBSCRIBE and PUBLISH at-least-once or exactly-once.
-// Identifiers are assigned in segments to separate transit management per type.
-const (
-	// A 14-bit address space allows for up to 16,384 pending transactions.
-	packetIDMask = 0x3fff
-
-	// The 2 most-significant bits distinguish the packet type.
-	subscriptionIDSpace = 0x4000
-	atLeastOnceIDSpace  = 0x8000
-	exactlyOnceIDSpace  = 0xc000
-	// Note that packet identifier zero is not permitted.
-)
-
 // ErrDown signals no-service after a failed connect attempt.
 // The error state will clear once a connect retry succeeds.
 var ErrDown = errors.New("mqtt: connection unavailable")
@@ -150,8 +136,6 @@ type Client struct {
 	// The semaphore allows for one ping request at a time.
 	pingAck chan chan<- error
 
-	subscription
-
 	// The semaphores lock the respective acknowledge queues with a
 	// submission counter. Overflows are acceptable.
 	atLeastOnceSem, exactlyOnceSem chan uint
@@ -159,7 +143,8 @@ type Client struct {
 	// Outbout PUBLISH acknowledgement is traced by a callback channel.
 	ackQ, recQ, compQ chan chan<- error
 
-	txOut
+	orderedTxs
+	unorderedTxs
 
 	// The read routine uses this reusable buffer for packet submission.
 	pendingAck [4]byte
@@ -169,11 +154,11 @@ type Client struct {
 // ReadSlices.
 func NewClient(config *ClientConfig) *Client {
 	// need 1 packet identifier free to determine the first and last entry
-	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > packetIDMask {
-		config.AtLeastOnceMax = packetIDMask
+	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
+		config.AtLeastOnceMax = publishIDMask
 	}
-	if config.ExactlyOnceMax < 0 || config.ExactlyOnceMax > packetIDMask {
-		config.ExactlyOnceMax = packetIDMask
+	if config.ExactlyOnceMax < 0 || config.ExactlyOnceMax > publishIDMask {
+		config.ExactlyOnceMax = publishIDMask
 	}
 	// apply defaults
 	if config.SessionConfig == nil {
@@ -181,25 +166,25 @@ func NewClient(config *ClientConfig) *Client {
 	}
 
 	c := &Client{
-		ClientConfig: *config, // copy
-		writeSem:     make(chan net.Conn, 1),
-		writeBlock:   make(chan struct{}, 1),
-		connSem:      make(chan net.Conn, 1),
-		subscription: subscription{
-			transit: make(map[uint16]*subscriptionCallback),
-		},
+		ClientConfig:   *config, // copy
+		connSem:        make(chan net.Conn, 1),
+		writeSem:       make(chan net.Conn, 1),
+		writeBlock:     make(chan struct{}, 1),
+		pingAck:        make(chan chan<- error, 1),
 		atLeastOnceSem: make(chan uint, 1),
 		exactlyOnceSem: make(chan uint, 1),
 		ackQ:           make(chan chan<- error, config.AtLeastOnceMax),
 		recQ:           make(chan chan<- error, config.ExactlyOnceMax),
 		compQ:          make(chan chan<- error, config.ExactlyOnceMax),
-		pingAck:        make(chan chan<- error, 1),
+		unorderedTxs: unorderedTxs{
+			perPacketID: make(map[uint16]unorderedCallback),
+		},
 	}
 	c.connSem <- nil
+	c.connectCtx, c.connectCancel = context.WithCancel(context.Background())
 	c.writeBlock <- struct{}{}
 	c.atLeastOnceSem <- 0
 	c.exactlyOnceSem <- 0
-	c.connectCtx, c.connectCancel = context.WithCancel(context.Background())
 	return c
 }
 
@@ -235,7 +220,7 @@ func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
 		case <-c.writeSem:
 		case <-c.writeBlock:
 		}
-		return nil, ErrAbort
+		return nil, ErrAbandon
 	}
 }
 
@@ -249,7 +234,7 @@ func (c *Client) Close() error {
 	switch err {
 	case nil:
 		err = conn.Close()
-	case ErrAbort, ErrDown:
+	case ErrAbandon, ErrDown:
 		err = nil
 	case ErrClosed:
 		return nil
@@ -280,7 +265,7 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 	go func() {
 		select {
 		case <-quit:
-			exit <- ErrAbort
+			exit <- ErrAbandon
 			conn.Close()
 		case <-done:
 			exit <- conn.Close()
@@ -293,8 +278,8 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 	writeErr := write(conn, packetDISCONNECT, c.WireTimeout)
 	close(done)
 	exitErr := <-exit
-	if exitErr == ErrAbort {
-		return ErrAbort
+	if exitErr == ErrAbandon {
+		return ErrAbandon
 	}
 	if writeErr != nil {
 		return writeErr
@@ -345,7 +330,7 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.subscription.close()
+		c.unorderedTxs.close()
 	}()
 
 	select {
@@ -673,7 +658,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			// level 2—breaking the "exactly once guarantee"—when
 			// the respective Client goes down before the recovery
 			// succeeds.
-			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remotePacketIDSpace
+			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.Store.Save(key, net.Buffers{c.pendingAck[:]})
 			if err != nil {
 				return nil, nil, err
@@ -810,7 +795,7 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 		i += 2
 
-		bytes, err := c.Store.Load(packetID | remotePacketIDSpace)
+		bytes, err := c.Store.Load(packetID | remoteIDKeyFlag)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -841,7 +826,7 @@ func (c *Client) onPUBREL() error {
 
 	c.pendingAck[0], c.pendingAck[1] = typePUBCOMP<<4, 2
 	c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
-	err := c.Store.Save(packetID|remotePacketIDSpace, net.Buffers{c.pendingAck[:4]})
+	err := c.Store.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck[:4]})
 	if err != nil {
 		c.pendingAck[0], c.pendingAck[1], c.pendingAck[2], c.pendingAck[3] = 0, 0, 0, 0
 		return err // causes resubmission of PUBREL

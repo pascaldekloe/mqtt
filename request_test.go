@@ -155,7 +155,7 @@ func TestSubscribe(t *testing.T) {
 
 	wantPacketHex(t, conn, hex.EncodeToString([]byte{
 		0x82, 19,
-		0x40, 0x00, // packet identifier
+		0x60, 0x00, // packet identifier
 		0, 5, 'u', '/', 'n', 'o', 'i',
 		2, // max QOS
 		0, 6, 'u', '/', 's', 'h', 'i', 'n',
