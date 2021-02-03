@@ -158,19 +158,19 @@ func TestClose(t *testing.T) {
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishRetained %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.PublishAtLeastOnce(nil, "x", nil)
+		_, err = client.PublishAtLeastOnce(nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishAtLeastOnce %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.PublishAtLeastOnceRetained(nil, "x", nil)
+		_, err = client.PublishAtLeastOnceRetained(nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishAtLeastOnceRetained %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.PublishExactlyOnce(nil, "x", nil)
+		_, err = client.PublishExactlyOnce(nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishExactlyOnce %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.PublishExactlyOnceRetained(nil, "x", nil)
+		_, err = client.PublishExactlyOnceRetained(nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishExactlyOnceRetained %d got error %q, want ErrClosed", n, err)
 		}

@@ -18,7 +18,7 @@ import (
 var Publish func(message []byte, topic string) error
 
 // PublishAtLeastOnce is a method from mqtt.Client.
-var PublishAtLeastOnce func(message []byte, topic string, ack chan<- error) error
+var PublishAtLeastOnce func(message []byte, topic string) (ack <-chan error, err error)
 
 // Subscribe is a method from mqtt.Client.
 var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
@@ -100,9 +100,8 @@ func ExampleNewClient() {
 }
 
 func ExampleClient_PublishAtLeastOnce() {
-	ack := make(chan error, 2) // must buffer
 	for {
-		err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert", ack)
+		ack, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
 		switch {
 		case err == nil:
 			log.Print("alert submitted")

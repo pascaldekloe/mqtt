@@ -110,27 +110,28 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	for i := 0; i < testN; i++ {
 		go func() {
 			defer wg.Done()
-			ack := make(chan error, 1)
+			var ack <-chan error
 			<-launch
 			var err error
 			switch deliveryLevel {
 			case 0:
 				err = client.Publish(testMessage, testTopic)
-				close(ack)
 			case 1:
-				err = client.PublishAtLeastOnce(testMessage, testTopic, ack)
+				ack, err = client.PublishAtLeastOnce(testMessage, testTopic)
 			case 2:
-				err = client.PublishExactlyOnce(testMessage, testTopic, ack)
+				ack, err = client.PublishExactlyOnce(testMessage, testTopic)
 			}
 			if err != nil {
 				t.Error("publish error:", err)
 				return
 			}
-			for err := range ack {
-				if errors.Is(err, mqtt.ErrClosed) {
-					break
+			if deliveryLevel != 0 {
+				for err := range ack {
+					t.Error("publish error:", err)
+					if errors.Is(err, mqtt.ErrClosed) {
+						break
+					}
 				}
-				t.Error("publish error:", err)
 			}
 		}()
 	}

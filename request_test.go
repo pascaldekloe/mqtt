@@ -169,105 +169,56 @@ func TestPublish(t *testing.T) {
 	client, conn := newClientPipe(t)
 
 	testRoutine(t, func() {
-		err := client.Publish([]byte("hello"), "greet")
-		if err != nil {
-			t.Error("publish error:", err)
-		}
+		wantPacketHex(t, conn, hex.EncodeToString([]byte{
+			0x30, 12,
+			0, 5, 'g', 'r', 'e', 'e', 't',
+			'h', 'e', 'l', 'l', 'o'}))
 	})
 
-	wantPacketHex(t, conn, hex.EncodeToString([]byte{
-		0x30, 12,
-		0, 5, 'g', 'r', 'e', 'e', 't',
-		'h', 'e', 'l', 'l', 'o'}))
+	err := client.Publish([]byte("hello"), "greet")
+	if err != nil {
+		t.Error("publish error:", err)
+	}
 }
 
 func TestPublishAtLeastOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
 
-	ack := make(chan error)
 	testRoutine(t, func() {
-		err := client.PublishAtLeastOnce([]byte("hello"), "greet", ack)
-		if err != nil {
-			t.Fatal("publish error:", err)
-		}
+		wantPacketHex(t, conn, hex.EncodeToString([]byte{
+			0x32, 14,
+			0, 5, 'g', 'r', 'e', 'e', 't',
+			0x80, 0x00, // packet identifier
+			'h', 'e', 'l', 'l', 'o'}))
+		sendPacketHex(t, conn, "40028000") // SUBACK
 	})
 
-	wantPacketHex(t, conn, hex.EncodeToString([]byte{
-		0x32, 14,
-		0, 5, 'g', 'r', 'e', 'e', 't',
-		0x80, 0x00, // packet identifier
-		'h', 'e', 'l', 'l', 'o'}))
-	select {
-	case err, ok := <-ack:
-		if ok {
-			t.Error("acknowledge error:", err)
-		} else {
-			t.Error("acknowledge before PUBACK")
-		}
-	case <-time.After(time.Millisecond):
-		break
+	ack, err := client.PublishAtLeastOnce([]byte("hello"), "greet")
+	if err != nil {
+		t.Fatal("publish error:", err)
 	}
-
-	sendPacketHex(t, conn, "40028000") // SUBACK
-	select {
-	case err, ok := <-ack:
-		if ok {
-			t.Error("acknowledge error:", err)
-		}
-	case <-time.After(time.Second / 4):
-		t.Error("acknowledge timeout (after PUBACK)")
-	}
+	testAckErrors(t, ack)
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
 
-	ack := make(chan error)
 	testRoutine(t, func() {
-		err := client.PublishExactlyOnce([]byte("hello"), "greet", ack)
-		if err != nil {
-			t.Fatal("publish error:", err)
-		}
+		wantPacketHex(t, conn, hex.EncodeToString([]byte{
+			0x34, 14,
+			0, 5, 'g', 'r', 'e', 'e', 't',
+			0xc0, 0x00, // packet identifier
+			'h', 'e', 'l', 'l', 'o'}))
+		sendPacketHex(t, conn, "5002c000") // PUBREC
+		wantPacketHex(t, conn, "6202c000") // PUBREL
+		sendPacketHex(t, conn, "7002c000") // PUBCOMP
 	})
 
-	wantPacketHex(t, conn, hex.EncodeToString([]byte{
-		0x34, 14,
-		0, 5, 'g', 'r', 'e', 'e', 't',
-		0xc0, 0x00, // packet identifier
-		'h', 'e', 'l', 'l', 'o'}))
-	sendPacketHex(t, conn, "5002c000") // PUBREC
-	wantPacketHex(t, conn, "6202c000") // PUBREL
-	select {
-	case err, ok := <-ack:
-		if ok {
-			t.Error("acknowledge error:", err)
-		} else {
-			t.Error("acknowledge before PUBCOMP")
-		}
-	case <-time.After(time.Millisecond):
-		break
+	ack, err := client.PublishExactlyOnce([]byte("hello"), "greet")
+	if err != nil {
+		t.Fatal("publish error:", err)
 	}
-
-	sendPacketHex(t, conn, "7002c000") // PUBCOMP
-	select {
-	case err, ok := <-ack:
-		if ok {
-			t.Error("acknowledge error:", err)
-		}
-	case <-time.After(time.Second / 4):
-		t.Error("acknowledge timeout (after PUBCOMP)")
-	}
-}
-
-func TestReceivePublish(t *testing.T) {
-	_, conn := newClientPipe(t, reception{Message: "hello", Topic: "greet"})
-
-	sendPacketHex(t, conn, hex.EncodeToString([]byte{
-		0x30, 12,
-		0, 5, 'g', 'r', 'e', 'e', 't',
-		'h', 'e', 'l', 'l', 'o'}))
-	// await message reception with timeout
-	time.Sleep(time.Second / 4)
+	testAckErrors(t, ack)
 }
 
 func TestReceivePublishAtLeastOnce(t *testing.T) {
@@ -293,4 +244,27 @@ func TestReceivePublishExactlyOnce(t *testing.T) {
 	wantPacketHex(t, conn, "5002abcd") // PUBREC
 	sendPacketHex(t, conn, "6002abcd") // PUBREL
 	wantPacketHex(t, conn, "7002abcd") // PUBCOMP
+}
+
+func testAckErrors(t *testing.T, ack <-chan error, want ...error) {
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-timeout.C:
+			t.Fatal("ack reading timeout")
+
+		case err, ok := <-ack:
+			switch {
+			case !ok:
+				return // done
+			case len(want) == 0:
+				t.Error("ack error:", err)
+			case !errors.Is(err, want[0]):
+				t.Errorf("ack error %q, want %q", err, want[0])
+			default:
+				want = want[1:]
+			}
+		}
+	}
 }

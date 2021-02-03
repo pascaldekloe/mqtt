@@ -414,16 +414,11 @@ func (c *Client) PublishRetained(message []byte, topic string) error {
 // This delivery method requires a response transmission plus persistence on
 // both client-side and broker-side.
 //
-// Ack(nowledge) is an optional feedback channel. The channel is closed uppon
-// receival confirmation by the broker. The channel should have a buffer to
-// receive without blocking. A blocked send to ack from PublishAtLeastOnce may
-// causes an error encounter from the first request submission to be returned
-// instead. Similar, a blocked send from ReadSlices causes resubmission errors
-// to be returned instead. Submission of ErrClosed will also not wait for a
-// blocking ack. The nil channel always blocks, which effectively disables the
-// feature.
-func (c *Client) PublishAtLeastOnce(message []byte, topic string, ack chan<- error) error {
-	return c.publishAtLeastOnceRetained(message, topic, ack, 0)
+// The acknowledge channel is closed uppon receival confirmation by the broker.
+// ErrClosed leaves the channel blocked (with no further input). A blocked send
+// from ReadSlices causes the error to be returned instead.
+func (c *Client) PublishAtLeastOnce(message []byte, topic string) (ack <-chan error, err error) {
+	return c.publishAtLeastOnceRetained(message, topic, 0)
 }
 
 // PublishAtLeastOnceRetained is like PublishAtLeastOnce, but the broker must
@@ -431,15 +426,15 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string, ack chan<- err
 // subscriptions match the topic name. When a new subscription is established,
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
-func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string, ack chan<- error) error {
-	return c.publishAtLeastOnceRetained(message, topic, ack, retainFlag)
+func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
+	return c.publishAtLeastOnceRetained(message, topic, retainFlag)
 }
 
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
 // This delivery method eliminates the duplicate-delivery risk from
 // PublishAtLeastOnce at the expense of an additional network roundtrip.
-func (c *Client) PublishExactlyOnce(message []byte, topic string, ack chan<- error) error {
-	return c.publishExactlyOnceRetained(message, topic, ack, 0)
+func (c *Client) PublishExactlyOnce(message []byte, topic string) (ack <-chan error, err error) {
+	return c.publishExactlyOnceRetained(message, topic, 0)
 }
 
 // PublishExactlyOnceRetained is like PublishExactlyOnce, but the broker must
@@ -447,36 +442,36 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string, ack chan<- err
 // subscriptions match the topic name. When a new subscription is established,
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
-func (c *Client) PublishExactlyOnceRetained(message []byte, topic string, ack chan<- error) error {
-	return c.publishExactlyOnceRetained(message, topic, ack, retainFlag)
+func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
+	return c.publishExactlyOnceRetained(message, topic, retainFlag)
 }
 
-func (c *Client) publishAtLeastOnceRetained(message []byte, topic string, ack chan<- error, flags byte) error {
+func (c *Client) publishAtLeastOnceRetained(message []byte, topic string, flags byte) (ack <-chan error, err error) {
 	counter, ok := <-c.atLeastOnceSem
 	if !ok {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	if cap(c.ackQ)-len(c.ackQ) == 0 {
 		c.exactlyOnceSem <- counter
-		return ErrMax
+		return nil, ErrMax
 	}
-	err := c.publishPersisted(message, topic, counter&publishIDMask|atLeastOnceIDSpace, atLeastOnceLevel<<1|flags, ack, c.ackQ, &counter)
+	ack, err = c.publishPersisted(message, topic, counter&publishIDMask|atLeastOnceIDSpace, atLeastOnceLevel<<1|flags, c.ackQ, &counter)
 	c.atLeastOnceSem <- counter
-	return err
+	return
 }
 
-func (c *Client) publishExactlyOnceRetained(message []byte, topic string, ack chan<- error, flags byte) error {
+func (c *Client) publishExactlyOnceRetained(message []byte, topic string, flags byte) (ack <-chan error, err error) {
 	counter, ok := <-c.exactlyOnceSem
 	if !ok {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	if cap(c.recQ)-len(c.recQ)-len(c.compQ) == 0 {
 		c.exactlyOnceSem <- counter
-		return ErrMax
+		return nil, ErrMax
 	}
-	err := c.publishPersisted(message, topic, counter&publishIDMask|exactlyOnceIDSpace, exactlyOnceLevel<<1|flags, ack, c.recQ, &counter)
+	ack, err = c.publishPersisted(message, topic, counter&publishIDMask|exactlyOnceIDSpace, exactlyOnceLevel<<1|flags, c.recQ, &counter)
 	c.exactlyOnceSem <- counter
-	return err
+	return
 }
 
 // ⚠️ Keep synchronised with publishPersisted.
@@ -506,13 +501,13 @@ func (c *Client) publish(message []byte, topic string, flags byte) error {
 }
 
 // ⚠️ Keep synchronised sync with publish.
-func (c *Client) publishPersisted(message []byte, topic string, packetID uint, flags byte, ack chan<- error, q chan<- chan<- error, counter *uint) error {
+func (c *Client) publishPersisted(message []byte, topic string, packetID uint, flags byte, queue chan<- chan<- error, counter *uint) (ack <-chan error, err error) {
 	if err := stringCheck(topic); err != nil {
-		return fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
+		return nil, fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
 	}
 	size := 4 + len(topic) + len(message)
 	if size < 0 || size > packetMax {
-		return fmt.Errorf("mqtt: PUBLISH denied: %w", errPacketMax)
+		return nil, fmt.Errorf("mqtt: PUBLISH denied: %w", errPacketMax)
 	}
 
 	// build request
@@ -529,24 +524,20 @@ func (c *Client) publishPersisted(message []byte, topic string, packetID uint, f
 	head = append(head, byte(packetID>>8), byte(packetID))
 	packet := net.Buffers{head, message}
 
-	err := c.Store.Save(packetID, packet)
+	err = c.Store.Save(packetID, packet)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// commit
-	q <- ack
+	done := make(chan error, 2)
+	queue <- done
 	*counter++
 	// submit
 	if err := c.writeAll(packet); err != nil {
-		select {
-		case ack <- err:
-			break
-		default:
-			return err
-		}
+		done <- err
 	}
-	return nil
+	return done, nil
 }
 
 // OnPUBACK applies the confirm of a PublishAtLeastOnce.
@@ -578,10 +569,7 @@ func (c *Client) onPUBACK() error {
 		return err // causes resubmission of PUBLISH
 	}
 	c.orderedTxs.Acked++
-	ack := <-c.ackQ
-	if ack != nil {
-		close(ack)
-	}
+	close(<-c.ackQ)
 	return nil
 }
 
@@ -656,9 +644,6 @@ func (c *Client) onPUBCOMP() error {
 		return err // causes resubmission of PUBREL (from persistence)
 	}
 	c.orderedTxs.Completed++
-	ack := <-c.compQ
-	if ack != nil {
-		close(ack)
-	}
+	close(<-c.compQ)
 	return nil
 }
