@@ -145,7 +145,7 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			err = client.Publish(message, *publishFlag)
+			err = client.Publish(nil, message, *publishFlag)
 			switch {
 			case err == nil:
 				if *verboseFlag {
@@ -167,9 +167,9 @@ func main() {
 			err := client.SubscribeLimitAtMostOnce(ctx.Done(), subscribeFlags...)
 			switch {
 			case err == nil, errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-				return // OK
-			case errors.Is(err, mqtt.ErrAbandon):
-				log.Fatal(name, ": subscribe timeout")
+				return
+			case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
+				log.Print(name, ": subscribe timeout")
 
 				fallthrough
 			default:
@@ -189,7 +189,7 @@ func main() {
 				break // OK
 			case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
 				return
-			case errors.Is(err, mqtt.ErrAbandon):
+			case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
 				log.Print(name, ": ping timeout")
 
 				fallthrough

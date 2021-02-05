@@ -175,7 +175,7 @@ func TestPublish(t *testing.T) {
 			'h', 'e', 'l', 'l', 'o'}))
 	})
 
-	err := client.Publish([]byte("hello"), "greet")
+	err := client.Publish(nil, []byte("hello"), "greet")
 	if err != nil {
 		t.Error("publish error:", err)
 	}

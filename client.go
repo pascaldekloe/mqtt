@@ -220,7 +220,7 @@ func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
 		case <-c.writeSem:
 		case <-c.writeBlock:
 		}
-		return nil, ErrAbandon
+		return nil, ErrCanceled
 	}
 }
 
@@ -234,7 +234,7 @@ func (c *Client) Close() error {
 	switch err {
 	case nil:
 		err = conn.Close()
-	case ErrAbandon, ErrDown:
+	case ErrCanceled, ErrDown:
 		err = nil
 	case ErrClosed:
 		return nil
@@ -245,6 +245,9 @@ func (c *Client) Close() error {
 
 // Disconnect tries a graceful termination, which discards the Will.
 // The Client is closed regardless of the error return.
+//
+// Quit is optional, as nil just blocks. Appliance of quit will strictly result
+// in ErrCanceled.
 //
 // BUG(pascaldekloe): The MQTT protocol has no confirmation for the
 // disconnect request. As a result, a client can never know for sure
@@ -259,32 +262,15 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 		return fmt.Errorf("mqtt: DISCONNECT not send: %w", err)
 	}
 
-	// Interrupt DISCONNECT (and cause ErrClosed) on quit receive.
-	done := make(chan struct{})
-	exit := make(chan error, 1)
-	go func() {
-		select {
-		case <-quit:
-			exit <- ErrAbandon
-			conn.Close()
-		case <-done:
-			exit <- conn.Close()
-		}
-	}()
-
 	// “After sending a DISCONNECT Packet the Client MUST NOT send
 	// any more Control Packets on that Network Connection.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
 	writeErr := write(conn, packetDISCONNECT, c.WireTimeout)
-	close(done)
-	exitErr := <-exit
-	if exitErr == ErrAbandon {
-		return ErrAbandon
-	}
+	closeErr := conn.Close()
 	if writeErr != nil {
 		return writeErr
 	}
-	return exitErr
+	return closeErr
 }
 
 func (c *Client) termCallbacks() {
@@ -342,16 +328,28 @@ func (c *Client) termCallbacks() {
 	wg.Wait()
 }
 
-// Write submits the packet. Keep synchronised with writeAll!
-func (c *Client) write(p []byte) error {
-	for {
-		conn, ok := <-c.writeSem // locks writes
+func (c Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
+	select {
+	case <-quit:
+		return nil, ErrCanceled
+	case conn, ok := <-c.writeSem: // locks writes
 		if !ok {
-			return ErrClosed
+			return nil, ErrClosed
 		}
 		if conn == nil {
 			c.writeSem <- nil // unlocks writes
-			return ErrDown
+			return nil, ErrDown
+		}
+		return conn, nil
+	}
+}
+
+// Write submits the packet. Keep synchronised with writeAll!
+func (c *Client) write(quit <-chan struct{}, p []byte) error {
+	for {
+		conn, err := c.lockWrite(quit)
+		if err != nil {
+			return err
 		}
 
 		switch err := write(conn, p, c.WireTimeout); {
@@ -372,15 +370,11 @@ func (c *Client) write(p []byte) error {
 }
 
 // WriteAll submits the packet. Keep synchronised with write!
-func (c *Client) writeAll(p net.Buffers) error {
+func (c *Client) writeAll(quit <-chan struct{}, p net.Buffers) error {
 	for {
-		conn, ok := <-c.writeSem // locks writes
-		if !ok {
-			return ErrClosed
-		}
-		if conn == nil {
-			c.writeSem <- nil // unlocks writes
-			return ErrDown
+		conn, err := c.lockWrite(quit)
+		if err != nil {
+			return err
 		}
 
 		switch err := writeAll(conn, p, c.WireTimeout); {
@@ -664,7 +658,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 				return nil, nil, err
 			}
 		}
-		err := c.write(c.pendingAck[:])
+		err := c.write(nil, c.pendingAck[:])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -831,7 +825,7 @@ func (c *Client) onPUBREL() error {
 		c.pendingAck[0], c.pendingAck[1], c.pendingAck[2], c.pendingAck[3] = 0, 0, 0, 0
 		return err // causes resubmission of PUBREL
 	}
-	err = c.write(c.pendingAck[:4])
+	err = c.write(nil, c.pendingAck[:4])
 	if err != nil {
 		return err // causes resubmission of PUBCOMP
 	}

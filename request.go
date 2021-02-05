@@ -14,9 +14,13 @@ import (
 // The plain Publish has no limit though.
 var ErrMax = errors.New("mqtt: maximum number of pending requests reached")
 
-// ErrAbandon gives up on a pending request. Quit channel reception may cause
-// ErrAbandon on the ack(nowledge) channel.
-var ErrAbandon = errors.New("mqtt: request abandoned while awaiting response")
+// ErrCanceled means that a quit signal got applied before the request was send.
+// The transacion never happened, as opposed to ErrAbandoned.
+var ErrCanceled = errors.New("mqtt: request canceled before submission")
+
+// ErrAbandoned means that a quit signal got applied after the request was send.
+// The result remains unknown, as opposed to ErrCanceled.
+var ErrAbandoned = errors.New("mqtt: request abandoned after submission")
 
 // BufSize should fit topic names with a bit of overhead.
 const bufSize = 128
@@ -28,6 +32,9 @@ var bufPool = sync.Pool{New: func() interface{} { return new([bufSize]byte) }}
 
 // Ping makes a roundtrip to validate the connection.
 // Only one request is permitted [ErrMax] at a time.
+//
+// Quit is optional, as nil just blocks. Appliance of quit will strictly result
+// in either ErrCanceled or ErrAbandoned.
 func (c *Client) Ping(quit <-chan struct{}) error {
 	// install callback
 	ch := make(chan error, 1)
@@ -39,7 +46,7 @@ func (c *Client) Ping(quit <-chan struct{}) error {
 	}
 
 	// submit transaction
-	if err := c.write(packetPINGREQ); err != nil {
+	if err := c.write(quit, packetPINGREQ); err != nil {
 		select {
 		case <-c.pingAck: // unlock
 		default: // picked up by unrelated pong
@@ -52,7 +59,7 @@ func (c *Client) Ping(quit <-chan struct{}) error {
 	case <-quit:
 		select {
 		case <-c.pingAck: // unlock
-			return ErrAbandon
+			return ErrAbandoned
 		default: // picked up in mean time
 			return <-ch
 		}
@@ -149,7 +156,7 @@ func (txs *unorderedTxs) startTx(topicFilters []string) (packetID uint16, done <
 	defer txs.Unlock()
 
 	// By using only a small window of the actual space we
-	// minimise any overlap risks with ErrAbandon cases.
+	// minimise any overlap risks with ErrAbandoned cases.
 	if len(txs.perPacketID) > unorderedIDMask>>4 {
 		return 0, nil, ErrMax
 	}
@@ -158,12 +165,9 @@ func (txs *unorderedTxs) startTx(topicFilters []string) (packetID uint16, done <
 	for {
 		packetID = uint16(txs.n&unorderedIDMask | space)
 		txs.n++
-		if c, ok := txs.perPacketID[packetID]; ok {
-			c.done <- ErrAbandon
-			delete(txs.perPacketID, packetID)
-			// Skip the identifier for now minimise the chance of
-			// collision with a very very late response.
-			continue
+		if _, ok := txs.perPacketID[packetID]; ok {
+			// Such collision indicates a very late response.
+			continue // just skips the identifier
 		}
 		txs.perPacketID[packetID] = unorderedCallback{
 			topicFilters: topicFilters,
@@ -193,6 +197,9 @@ func (txs *unorderedTxs) close() {
 
 // Subscribe requests subscription for all topics that match any of the filter
 // arguments.
+//
+// Quit is optional, as nil just blocks. Appliance of quit will strictly result
+// in either ErrCanceled or ErrAbandoned.
 func (c *Client) Subscribe(quit <-chan struct{}, topicFilters ...string) error {
 	return c.subscribeLevel(quit, topicFilters, exactlyOnceLevel)
 }
@@ -247,7 +254,7 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	}
 
 	// network submission
-	if err = c.write(packet); err != nil {
+	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
 		return err
 	}
@@ -256,7 +263,7 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 		return err
 	case <-quit:
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return ErrAbandon
+		return ErrAbandoned
 	}
 }
 
@@ -287,7 +294,7 @@ func (c *Client) onSUBACK() error {
 
 	// commit
 	done, topicFilters := c.unorderedTxs.endTx(packetID)
-	if done == nil { // hopefully due ErrAbandon
+	if done == nil { // hopefully due ErrAbandoned
 		return nil
 	}
 
@@ -315,6 +322,9 @@ func (c *Client) onSUBACK() error {
 
 // Unsubscribe requests subscription cancelation for each of the filter
 // arguments.
+//
+// Quit is optional, as nil just blocks. Appliance of quit will strictly result
+// in either ErrCanceled or ErrAbandoned.
 func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error {
 	if len(topicFilters) == 0 {
 		return errUnsubscribeNone
@@ -354,7 +364,7 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	}
 
 	// network submission
-	if err = c.write(packet); err != nil {
+	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
 		return err
 	}
@@ -363,7 +373,7 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 		return err
 	case <-quit:
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return ErrAbandon
+		return ErrAbandoned
 	}
 }
 
@@ -396,8 +406,11 @@ type orderedTxs struct {
 // Publish delivers the message with an “at most once” guarantee.
 // Subscribers may or may not receive the message when subject to error.
 // This delivery method is the most efficient option.
-func (c *Client) Publish(message []byte, topic string) error {
-	return c.publish(message, topic, 0)
+///
+// Quit is optional, as nil just blocks. Appliance of quit will strictly result
+// in ErrCanceled.
+func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) error {
+	return c.publish(quit, message, topic, 0)
 }
 
 // PublishRetained is like Publish, but the broker should store the message, so
@@ -405,8 +418,8 @@ func (c *Client) Publish(message []byte, topic string) error {
 // topic name. The broker may choose to discard the message at any time though.
 // Uppon reception, the broker must discard any message previously retained for
 // the topic name.
-func (c *Client) PublishRetained(message []byte, topic string) error {
-	return c.publish(message, topic, retainFlag)
+func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic string) error {
+	return c.publish(quit, message, topic, retainFlag)
 }
 
 // PublishAtLeastOnce delivers the message with an “at least once” guarantee.
@@ -475,7 +488,7 @@ func (c *Client) publishExactlyOnceRetained(message []byte, topic string, flags 
 }
 
 // ⚠️ Keep synchronised with publishPersisted.
-func (c *Client) publish(message []byte, topic string, flags byte) error {
+func (c *Client) publish(quit <-chan struct{}, message []byte, topic string, flags byte) error {
 	if err := stringCheck(topic); err != nil {
 		return fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
 	}
@@ -497,7 +510,7 @@ func (c *Client) publish(message []byte, topic string, flags byte) error {
 	head = append(head, topic...)
 
 	// submit
-	return c.writeAll(net.Buffers{head, message})
+	return c.writeAll(quit, net.Buffers{head, message})
 }
 
 // ⚠️ Keep synchronised sync with publish.
@@ -534,7 +547,7 @@ func (c *Client) publishPersisted(message []byte, topic string, packetID uint, f
 	queue <- done
 	*counter++
 	// submit
-	if err := c.writeAll(packet); err != nil {
+	if err := c.writeAll(nil, packet); err != nil {
 		done <- err
 	}
 	return done, nil
@@ -607,7 +620,7 @@ func (c *Client) onPUBREC() error {
 	c.compQ <- <-c.recQ
 
 	// errors cause resubmission of PUBREL (from persistence)
-	err = c.write(c.pendingAck[:4])
+	err = c.write(nil, c.pendingAck[:4])
 	if err != nil {
 		return err
 	}

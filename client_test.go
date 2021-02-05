@@ -150,11 +150,11 @@ func TestClose(t *testing.T) {
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("Unsubscribe %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.Publish(nil, "x")
+		err = client.Publish(nil, nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("Publish %d got error %q, want ErrClosed", n, err)
 		}
-		err = client.PublishRetained(nil, "x")
+		err = client.PublishRetained(nil, nil, "x")
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("PublishRetained %d got error %q, want ErrClosed", n, err)
 		}

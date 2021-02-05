@@ -115,7 +115,7 @@ func race(t *testing.T, host string, deliveryLevel int) {
 			var err error
 			switch deliveryLevel {
 			case 0:
-				err = client.Publish(testMessage, testTopic)
+				err = client.Publish(nil, testMessage, testTopic)
 			case 1:
 				ack, err = client.PublishAtLeastOnce(testMessage, testTopic)
 			case 2:

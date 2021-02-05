@@ -15,7 +15,7 @@ import (
 )
 
 // Publish is a method from mqtt.Client.
-var Publish func(message []byte, topic string) error
+var Publish func(quit <-chan struct{}, message []byte, topic string) error
 
 // PublishAtLeastOnce is a method from mqtt.Client.
 var PublishAtLeastOnce func(message []byte, topic string) (ack <-chan error, err error)
@@ -147,7 +147,7 @@ func ExampleClient_Subscribe_context() {
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			log.Print("no subscribe: ", err)
 			return
-		case errors.Is(err, mqtt.ErrAbandon):
+		case errors.Is(err, mqtt.ErrAbandoned):
 			log.Print("subscribe state unknown: ", ctx.Err())
 			return
 		default:
