@@ -96,10 +96,10 @@ func stringCheck(s string) error {
 	return nil
 }
 
-// IsDeny returns whether some request was rejected by a Client based on
-// validation constraints, such as size limitations and UTF-8 encodings.
-// The rejection is permanent in such case. Another invocation with the
-// same arguments will result in the same error again.
+// IsDeny returns whether execution was rejected by the Client based on some
+// validation constraint, like size limitations or an illegal UTF-8 encoding.
+// The rejection is permanent in such case. Another invocation with the same
+// arguments will result in the same error again.
 func IsDeny(err error) bool {
 	for err != nil {
 		switch err {
@@ -314,6 +314,16 @@ func (code connectReturn) Error() string {
 	default:
 		return fmt.Sprintf(refuse+"connect return code %d reserved for future use", code)
 	}
+}
+
+// IsConnectionRefused returns whether the broker denied a connect request from
+// the Client.
+func IsConnectionRefused(err error) bool {
+	var code connectReturn
+	if errors.As(err, &code) {
+		return code != accepted
+	}
+	return false
 }
 
 // Store keys correspond to MQTT packet identifiers.

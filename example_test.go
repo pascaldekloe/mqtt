@@ -39,8 +39,8 @@ func init() {
 	Subscribe = c.Subscribe
 }
 
-// It is good practice to setup the client in main.
-func ExampleNewClient() {
+// It is good practice to install the client from main.
+func ExampleNewClient_setup() {
 	client := mqtt.NewClient(&mqtt.ClientConfig{
 		Connecter:     mqtt.UnsecuredConnecter("tcp", "localhost:1883"),
 		SessionConfig: mqtt.NewVolatileSessionConfig("demo"),
@@ -59,18 +59,24 @@ func ExampleNewClient() {
 
 			case errors.Is(err, mqtt.ErrClosed):
 				return // terminated
+
 			case mqtt.IsDeny(err):
 				log.Fatal(err) // faulty configuration
 
+			case mqtt.IsConnectionRefused(err):
+				log.Print(err)
+				// ErrDown for a while
+				time.Sleep(5*time.Minute - time.Second)
+
 			default:
 				log.Print("MQTT unavailable: ", err)
-				// backoff prevents resource hog
-				time.Sleep(time.Second / 2)
+				// ErrDown for short backoff
+				time.Sleep(2 * time.Second)
 			}
 		}
 	}()
 
-	// Install the methods used by the respective packages as variables.
+	// Install each method in use as a package variable.
 	// Such setup allows for unit tests with stubs.
 	Publish = client.Publish
 
@@ -96,10 +102,12 @@ func ExampleNewClient() {
 			}
 		}
 	}()
+
 	// Output:
 }
 
-func ExampleClient_PublishAtLeastOnce() {
+// Demo various error scenario and how to act uppon them.
+func ExampleClient_PublishAtLeastOnce_hasty() {
 	for {
 		ack, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
 		switch {
@@ -109,6 +117,11 @@ func ExampleClient_PublishAtLeastOnce() {
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			log.Print("🚨 alert not send: ", err)
 			return
+
+		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
+			log.Print("⚠️ alert delay: ", err)
+			time.Sleep(time.Second / 4)
+			continue
 
 		default:
 			backoff := time.Second
@@ -127,13 +140,13 @@ func ExampleClient_PublishAtLeastOnce() {
 			log.Print("⚠️ alert delay: ", err)
 		}
 		log.Print("alert confirmed")
-		return
+		break
 	}
 	// Output:
 }
 
 // Demo various error scenario and how to act uppon them.
-func ExampleClient_Subscribe_context() {
+func ExampleClient_Subscribe_sticky() {
 	const topicFilter = "demo/+"
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -144,23 +157,22 @@ func ExampleClient_Subscribe_context() {
 		case err == nil:
 			log.Printf("subscribed to %q", topicFilter)
 			return
+
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			log.Print("no subscribe: ", err)
 			return
-		case errors.Is(err, mqtt.ErrAbandoned):
-			log.Print("subscribe state unknown: ", ctx.Err())
+
+		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
+			log.Print("subscribe timeout: ", err)
 			return
+
+		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
+			time.Sleep(time.Second)
+
 		default:
-			log.Printf("subscribe retry on: %s", err)
-			backoff := time.NewTimer(time.Second)
-			select {
-			case <-backoff.C:
-				continue
-			case <-ctx.Done():
-				backoff.Stop()
-				log.Print("subscribe abort: ", ctx.Err())
-				return
-			}
+			backoff := 4 * time.Second
+			log.Printf("subscribe retry in %s on: %s", backoff, err)
+			time.Sleep(backoff)
 		}
 	}
 	// Output:
