@@ -44,12 +44,12 @@ var (
 	errRESERVED15     = fmt.Errorf("%w: reserved packet type 15 is forbidden", errProtoReset)
 )
 
-// Connecter abstracts the transport layer establishment.
-type Connecter func(ctx context.Context) (net.Conn, error)
+// Dialer abstracts the transport layer establishment.
+type Dialer func(ctx context.Context) (net.Conn, error)
 
-// UnsecuredConnecter creates plain network connections.
+// UnsecuredDialer creates plain network connections.
 // See net.Dial for details on the network & address syntax.
-func UnsecuredConnecter(network, address string) Connecter {
+func UnsecuredDialer(network, address string) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		// minimize timer use; covered by WireTimeout
 		dialer := net.Dialer{KeepAlive: -1}
@@ -57,9 +57,9 @@ func UnsecuredConnecter(network, address string) Connecter {
 	}
 }
 
-// SecuredConnecter creates TLS network connections.
+// SecuredDialer creates TLS network connections.
 // See net.Dial for details on the network & address syntax.
-func SecuredConnecter(network, address string, config *tls.Config) Connecter {
+func SecuredDialer(network, address string, config *tls.Config) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		dialer := tls.Dialer{
 			// minimize timer use; covered by WireTimeout
@@ -70,12 +70,12 @@ func SecuredConnecter(network, address string, config *tls.Config) Connecter {
 	}
 }
 
-// Config is a Client configuration. Connecter and Store are the only required
+// Config is a Client configuration. Dialer and Store are the only required
 // fields, although a specific BufSize and a non-zero WireTimeout comes highly
 // recommended.
 type Config struct {
-	Connecter // chooses the broker
-	Store     // persists the session
+	Dialer // chooses the broker
+	Store  // persists the session
 
 	// BufSize defines the read buffer capacity, which goes up to 256 MiB.
 	BufSize int
@@ -227,10 +227,9 @@ type Client struct {
 	// successful connect yet.
 	connSem chan net.Conn
 
-	// The context is fed to the Connecter, which allows for faster aborts
-	// during a Close.
-	connectCtx    context.Context
-	connectCancel context.CancelFunc
+	// The context is fed to Dialer for fast aborts during a Close.
+	dialCtx    context.Context
+	dialCancel context.CancelFunc
 
 	// Write operations have four states:
 	// * pending (re)connect with a .writeBlock entry
@@ -265,11 +264,11 @@ type Client struct {
 // NewClient returns a new Client. Configuration errors result in IsDeny on
 // ReadSlices.
 func NewClient(config *Config) *Client {
-	if config.Connecter == nil {
-		panic("nil connecter")
+	if config.Dialer == nil {
+		panic("nil Dialer")
 	}
 	if config.Store == nil {
-		panic("nil store")
+		panic("nil Store")
 	}
 	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
@@ -295,7 +294,7 @@ func NewClient(config *Config) *Client {
 		},
 	}
 	c.connSem <- nil
-	c.connectCtx, c.connectCancel = context.WithCancel(context.Background())
+	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
 	c.writeBlock <- struct{}{}
 	c.atLeastOnceSem <- 0
 	c.exactlyOnceSem <- 0
@@ -306,7 +305,7 @@ func NewClient(config *Config) *Client {
 // requests are denied with ErrClosed, regardless of the error return.
 func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
 	// terminate connection control
-	c.connectCancel()
+	c.dialCancel()
 	conn, ok := <-c.connSem
 	if !ok {
 		return nil, ErrClosed
@@ -673,12 +672,12 @@ func (c *Client) connect() error {
 	// the first Packet sent from the Client to the Server MUST be a CONNECT
 	// Packet.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
-	conn, err := c.Connecter(c.connectCtx)
+	conn, err := c.Dialer(c.dialCtx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
 		// See <https://github.com/golang/go/issues/36208>.
-		if c.connectCtx.Err() != nil {
+		if c.dialCtx.Err() != nil {
 			return ErrClosed
 		}
 		return err
@@ -725,7 +724,7 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	switch {
 	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
 		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
-	case c.connectCtx.Err() != nil:
+	case c.dialCtx.Err() != nil:
 		return nil, ErrClosed
 	case len(packet) < 4:
 		return nil, fmt.Errorf("mqtt: incomplete CONNACK %#x: %w", packet, err)

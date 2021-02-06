@@ -68,13 +68,13 @@ func TestCONNACK(t *testing.T) {
 				brokerEnd.Close()
 			})
 
-			var connectN int
+			var dialN int
 			client := NewClient(&Config{
-				Connecter: func(context.Context) (net.Conn, error) {
-					if connectN != 0 {
-						return nil, errors.New("reconnect (with test pipe) denied")
+				Dialer: func(context.Context) (net.Conn, error) {
+					if dialN != 0 {
+						return nil, errors.New("redial (with test pipe) denied")
 					}
-					connectN++
+					dialN++
 					return clientEnd, nil
 				},
 				Store:       NewVolatileStore("test-client"),
@@ -117,8 +117,8 @@ func TestClose(t *testing.T) {
 	t.Parallel()
 
 	client := NewClient(&Config{
-		Connecter: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("connecter invoked")
+		Dialer: func(context.Context) (net.Conn, error) {
+			return nil, errors.New("dialer invoked")
 		},
 		Store:       NewVolatileStore("test-client"),
 		WireTimeout: time.Second / 2,

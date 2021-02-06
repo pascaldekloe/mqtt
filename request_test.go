@@ -43,13 +43,13 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 		brokerEnd.Close()
 	})
 
-	var connectN int
+	var dialN int
 	client := NewClient(&Config{
-		Connecter: func(context.Context) (net.Conn, error) {
-			if connectN != 0 {
-				return nil, errors.New("reconnect (with test pipe) denied")
+		Dialer: func(context.Context) (net.Conn, error) {
+			if dialN != 0 {
+				return nil, errors.New("redial (with test pipe) denied")
 			}
-			connectN++
+			dialN++
 			return clientEnd, nil
 		},
 		Store:          NewVolatileStore("test-client"),

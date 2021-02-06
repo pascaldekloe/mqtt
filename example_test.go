@@ -28,8 +28,8 @@ func init() {
 	log.SetOutput(ioutil.Discard)
 
 	c := mqtt.NewClient(&mqtt.Config{
-		Connecter: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("won't connect demo client")
+		Dialer: func(context.Context) (net.Conn, error) {
+			return nil, errors.New("won't dial for demo client")
 		},
 		Store: mqtt.NewVolatileStore("demo-client"),
 	})
@@ -42,7 +42,7 @@ func init() {
 // It is good practice to install the client from main.
 func ExampleNewClient_setup() {
 	client := mqtt.NewClient(&mqtt.Config{
-		Connecter:   mqtt.UnsecuredConnecter("tcp", "localhost:1883"),
+		Dialer:      mqtt.UnsecuredDialer("tcp", "localhost:1883"),
 		Store:       mqtt.NewVolatileStore("demo-client"),
 		WireTimeout: time.Second,
 		BufSize:     8192,

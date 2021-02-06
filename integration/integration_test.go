@@ -47,7 +47,7 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	testTopic := fmt.Sprintf("test/race-%d", deliveryLevel)
 
 	client := mqtt.NewClient(&mqtt.Config{
-		Connecter:      mqtt.UnsecuredConnecter("tcp", net.JoinHostPort(host, "1883")),
+		Dialer:         mqtt.UnsecuredDialer("tcp", net.JoinHostPort(host, "1883")),
 		WireTimeout:    time.Second,
 		BufSize:        1024,
 		Store:          mqtt.NewVolatileStore(t.Name()),

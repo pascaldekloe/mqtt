@@ -91,11 +91,11 @@ func parseConfig() *mqtt.Config {
 		UserName:    *userFlag,
 	}
 	if *tlsFlag {
-		config.Connecter = mqtt.SecuredConnecter(*netFlag, addr, &tls.Config{
+		config.Dialer = mqtt.SecuredDialer(*netFlag, addr, &tls.Config{
 			ServerName: *serverFlag,
 		})
 	} else {
-		config.Connecter = mqtt.UnsecuredConnecter(*netFlag, addr)
+		config.Dialer = mqtt.UnsecuredDialer(*netFlag, addr)
 	}
 	if *passFlag != "" {
 		bytes, err := os.ReadFile(*passFlag)
