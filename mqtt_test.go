@@ -17,14 +17,15 @@ func TestConstants(t *testing.T) {
 }
 
 func TestNewCONNREQ(t *testing.T) {
+	c := &Config{Store: NewVolatileStore("")}
 	want := []byte{0x10, 12, 0, 4, 'M', 'Q', 'T', 'T', 4, 0, 0, 0, 0, 0}
-	if got, err := NewVolatileSessionConfig("").newCONNREQ(); err != nil {
+	if got, err := c.newCONNREQ(); err != nil {
 		t.Error("empty configuration got error:", err)
 	} else if !bytes.Equal(got, want) {
 		t.Errorf("empty configuration got %#x, want %#x", got, want)
 	}
 
-	c := NewVolatileSessionConfig("#🤖")
+	c.Store = NewVolatileStore("#🤖")
 	c.UserName = "me"
 	c.Password = []byte{'?'}
 	c.CleanSession = true
@@ -48,9 +49,15 @@ func TestNewCONNREQ(t *testing.T) {
 	}
 }
 
+func newVolatileStore() Store {
+	store := NewVolatileStore("")
+	store.Delete(clientIDKey)
+	return store
+}
+
 func TestPesistenceEmpty(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreEmpty(t, newVolatile(""))
+		testStoreEmpty(t, newVolatileStore())
 	})
 }
 
@@ -74,7 +81,7 @@ func testStoreEmpty(t *testing.T, x Store) {
 
 func TestStore(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStore(t, newVolatile(""))
+		testStore(t, newVolatileStore())
 	})
 }
 
@@ -127,7 +134,7 @@ func testStore(t *testing.T, x Store) {
 
 func TestStoreUpdate(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreUpdate(t, newVolatile(""))
+		testStoreUpdate(t, newVolatileStore())
 	})
 }
 
@@ -163,7 +170,7 @@ func testStoreUpdate(t *testing.T, x Store) {
 
 func TestStoreDelete(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreDelete(t, newVolatile(""))
+		testStoreDelete(t, newVolatileStore())
 	})
 }
 

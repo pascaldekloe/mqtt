@@ -27,11 +27,11 @@ func init() {
 	// The log lines serve as example explanation only.
 	log.SetOutput(ioutil.Discard)
 
-	c := mqtt.NewClient(&mqtt.ClientConfig{
-		SessionConfig: mqtt.NewVolatileSessionConfig("demo"),
+	c := mqtt.NewClient(&mqtt.Config{
 		Connecter: func(context.Context) (net.Conn, error) {
 			return nil, errors.New("won't connect demo client")
 		},
+		Store: mqtt.NewVolatileStore("demo-client"),
 	})
 	c.Close()
 
@@ -41,11 +41,11 @@ func init() {
 
 // It is good practice to install the client from main.
 func ExampleNewClient_setup() {
-	client := mqtt.NewClient(&mqtt.ClientConfig{
-		Connecter:     mqtt.UnsecuredConnecter("tcp", "localhost:1883"),
-		SessionConfig: mqtt.NewVolatileSessionConfig("demo"),
-		WireTimeout:   time.Second,
-		BufSize:       8192,
+	client := mqtt.NewClient(&mqtt.Config{
+		Connecter:   mqtt.UnsecuredConnecter("tcp", "localhost:1883"),
+		Store:       mqtt.NewVolatileStore("demo-client"),
+		WireTimeout: time.Second,
+		BufSize:     8192,
 	})
 
 	// launch read-routine

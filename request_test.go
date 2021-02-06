@@ -44,7 +44,7 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 	})
 
 	var connectN int
-	client := NewClient(&ClientConfig{
+	client := NewClient(&Config{
 		Connecter: func(context.Context) (net.Conn, error) {
 			if connectN != 0 {
 				return nil, errors.New("reconnect (with test pipe) denied")
@@ -52,6 +52,7 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 			connectN++
 			return clientEnd, nil
 		},
+		Store:          NewVolatileStore("test-client"),
 		WireTimeout:    time.Second / 2,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
@@ -96,7 +97,7 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 	}()
 
 	// read CONNECT
-	wantPacketHex(t, brokerEnd, "100c00044d515454040000000000")
+	wantPacketHex(t, brokerEnd, "101700044d51545404000000000b746573742d636c69656e74")
 	// write CONNACK
 	sendPacketHex(t, brokerEnd, "20020000")
 

@@ -59,7 +59,7 @@ var (
 	verboseFlag = flag.Bool("verbose", false, "Produces more output to "+italic+"standard error"+clear+" for debug purposes.")
 )
 
-func parseConfig() *mqtt.ClientConfig {
+func parseConfig() *mqtt.Config {
 	var addr string
 	switch args := flag.Args(); {
 	case len(args) == 0:
@@ -85,9 +85,10 @@ func parseConfig() *mqtt.ClientConfig {
 	if clientID == generatedLabel {
 		clientID = "mqttc(1)-" + time.Now().In(time.UTC).Format(time.RFC3339Nano)
 	}
-	config := &mqtt.ClientConfig{
-		SessionConfig: mqtt.NewVolatileSessionConfig(clientID),
-		WireTimeout:   *timeoutFlag,
+	config := &mqtt.Config{
+		Store:       mqtt.NewVolatileStore(clientID),
+		WireTimeout: *timeoutFlag,
+		UserName:    *userFlag,
 	}
 	if *tlsFlag {
 		config.Connecter = mqtt.SecuredConnecter(*netFlag, addr, &tls.Config{
@@ -96,7 +97,6 @@ func parseConfig() *mqtt.ClientConfig {
 	} else {
 		config.Connecter = mqtt.UnsecuredConnecter(*netFlag, addr)
 	}
-	config.UserName = *userFlag
 	if *passFlag != "" {
 		bytes, err := os.ReadFile(*passFlag)
 		if err != nil {

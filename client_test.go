@@ -69,7 +69,7 @@ func TestCONNACK(t *testing.T) {
 			})
 
 			var connectN int
-			client := NewClient(&ClientConfig{
+			client := NewClient(&Config{
 				Connecter: func(context.Context) (net.Conn, error) {
 					if connectN != 0 {
 						return nil, errors.New("reconnect (with test pipe) denied")
@@ -77,8 +77,8 @@ func TestCONNACK(t *testing.T) {
 					connectN++
 					return clientEnd, nil
 				},
-				SessionConfig: NewVolatileSessionConfig(""),
-				WireTimeout:   time.Second / 2,
+				Store:       NewVolatileStore("test-client"),
+				WireTimeout: time.Second / 2,
 			})
 
 			done := make(chan error)
@@ -90,7 +90,7 @@ func TestCONNACK(t *testing.T) {
 			}()
 
 			// read CONNECT
-			wantPacketHex(t, brokerEnd, "100c00044d515454040000000000")
+			wantPacketHex(t, brokerEnd, "101700044d51545404000000000b746573742d636c69656e74")
 			// write CONNACK
 			sendPacketHex(t, brokerEnd, gold.send)
 
@@ -116,11 +116,12 @@ func TestCONNACK(t *testing.T) {
 func TestClose(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient(&ClientConfig{
+	client := NewClient(&Config{
 		Connecter: func(context.Context) (net.Conn, error) {
 			return nil, errors.New("connecter invoked")
 		},
-		SessionConfig: NewVolatileSessionConfig(""),
+		Store:       NewVolatileStore("test-client"),
+		WireTimeout: time.Second / 2,
 	})
 
 	// Invoke Close before ReadSlices (connects).

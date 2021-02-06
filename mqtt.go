@@ -112,161 +112,6 @@ func IsDeny(err error) bool {
 	return false
 }
 
-// SessionConfig is a configuration for the connection state.
-// Clients can't share a configuration because they can't share the Store.
-type SessionConfig struct {
-	// Store persists a session. Use CleanSession to reset the content.
-	Store
-
-	// The user name may be used by the broker for authentication and/or
-	// authorization purposes. An empty string omits the option, except
-	// for when password is not nil.
-	UserName string
-	Password []byte // option omitted when nil
-
-	// The Will Message is published when the connection terminates
-	// without Disconnect. A nil Message disables the Will option.
-	Will struct {
-		Topic   string // destination
-		Message []byte // payload
-
-		Retain      bool // see PublishRetained
-		AtLeastOnce bool // see PublishAtLeastOnce
-		ExactlyOnce bool // overrides AtLeastOnce
-	}
-
-	KeepAlive uint16 // timeout in seconds (disabled with zero)
-
-	// Brokers must resume communications with the client (identified by
-	// ClientID) when CleanSession is false. Otherwise, brokers must create
-	// a new session when either CleanSession is true or when no session is
-	// associated to the client identifier.
-	CleanSession bool
-}
-
-// NewVolatileSessionConfig returns a new configuration with a Store which
-// resides in memory only. This configuration is only recommended for testing or
-// deliveries with the “at most once” guarantee [Publish] or subscriptions
-// without the “exactly once” guarantee [SubscribeLimitAtLeastOnce].
-// Brokers use clientID to uniquely identify the session.
-func NewVolatileSessionConfig(clientID string) *SessionConfig {
-	return &SessionConfig{Store: newVolatile(clientID)}
-}
-
-// NewSessionConfig returns a new configuration for the Store. Brokers use the
-// clientID to uniquely identify the session. If the Store was not used before,
-// then the content is initialized for clientID. Otherwise clientID must match
-// the initialization.
-//
-// A Store can serve only one Client at a time!
-func NewSessionConfig(clientID string, store Store) (*SessionConfig, error) {
-	if err := stringCheck(clientID); err != nil {
-		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
-	}
-
-	bytes, err := store.Load(clientIDKey)
-	switch {
-	case err != nil:
-		return nil, err
-	case bytes == nil:
-		err := store.Save(clientIDKey, net.Buffers{[]byte(clientID)})
-		if err != nil {
-			return nil, err
-		}
-	case string(bytes) != clientID:
-		return nil, fmt.Errorf("mqtt: store mismatch on client identifier %q", bytes)
-	}
-
-	return &SessionConfig{Store: store}, nil
-}
-
-// NewCONNREQ returns a new packet.
-func (c *SessionConfig) newCONNREQ() ([]byte, error) {
-	clientID, err := c.Load(clientIDKey)
-	if err != nil {
-		return nil, err
-	}
-	err = stringCheck(string(clientID))
-	if err != nil {
-		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
-	}
-
-	size := 12 + len(clientID)
-	var flags uint
-
-	if err := stringCheck(c.UserName); err != nil {
-		return nil, fmt.Errorf("mqtt: illegal user name: %w", err)
-	}
-	// Supply an empty user name when the password is set to comply with “If
-	// the User Name Flag is set to 0, the Password Flag MUST be set to 0.”
-	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.2-22
-	if c.UserName != "" || c.Password != nil {
-		size += 2 + len(c.UserName)
-		flags |= 1 << 7
-	}
-
-	if len(c.Password) > stringMax {
-		return nil, fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
-	}
-	if c.Password != nil {
-		size += 2 + len(c.Password)
-		flags |= 1 << 6
-	}
-
-	if c.Will.Message != nil {
-		if err := stringCheck(c.Will.Topic); err != nil {
-			return nil, fmt.Errorf("mqtt: illegal will topic: %w", err)
-		}
-		if len(c.Will.Message) > stringMax {
-			return nil, fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
-		}
-		size += 4 + len(c.Will.Topic) + len(c.Will.Message)
-		if c.Will.Retain {
-			flags |= 1 << 5
-		}
-		switch {
-		case c.Will.ExactlyOnce:
-			flags |= exactlyOnceLevel << 3
-		case c.Will.AtLeastOnce:
-			flags |= atLeastOnceLevel << 3
-		}
-		flags |= 1 << 2
-	}
-
-	if c.CleanSession {
-		flags |= 1 << 1
-	}
-
-	// encode packet
-	packet := make([]byte, 0, size+2)
-	packet = append(packet, typeCONNECT<<4)
-	l := uint(size)
-	for ; l > 0x7f; l >>= 7 {
-		packet = append(packet, byte(l|0x80))
-	}
-	packet = append(packet, byte(l),
-		0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags),
-		byte(c.KeepAlive>>8), byte(c.KeepAlive),
-		byte(len(clientID)>>8), byte(len(clientID)),
-	)
-	packet = append(packet, clientID...)
-	if c.Will.Message != nil {
-		packet = append(packet, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
-		packet = append(packet, c.Will.Topic...)
-		packet = append(packet, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
-		packet = append(packet, c.Will.Message...)
-	}
-	if c.UserName != "" || c.Password != nil {
-		packet = append(packet, byte(len(c.UserName)>>8), byte(len(c.UserName)))
-		packet = append(packet, c.UserName...)
-	}
-	if c.Password != nil {
-		packet = append(packet, byte(len(c.Password)>>8), byte(len(c.Password)))
-		packet = append(packet, c.Password...)
-	}
-	return packet, nil
-}
-
 // ConnectReturn is the response code CONNACK.
 type connectReturn byte
 
@@ -337,7 +182,8 @@ const (
 	remoteIDKeyFlag = 1 << 16
 )
 
-// Store defines session persistence for a Client.
+// Store defines session persistence for a Client. A Store may serve only one
+// Client at a time.
 //
 // Content is addressed by a 17-bit key, mask 0x1ffff.
 // The maximum size for entries is 256 MiB + 5 B.
@@ -359,18 +205,48 @@ type Store interface {
 	List() (keys []uint, err error)
 }
 
+// InitSession configures the Store for first use. Brokers use clientID to
+// uniquely identify the session. A session may be continued by using the same
+// Store (content) again with another Client.
+func InitSession(store Store, clientID string) error {
+	// fail-fast
+	if err := stringCheck(clientID); err != nil {
+		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
+	}
+
+	// empty check
+	keys, err := store.List()
+	if err != nil {
+		return err
+	}
+	if len(keys) != 0 {
+		return errors.New("mqtt: store already in use [not empty]")
+	}
+
+	// install
+	return store.Save(clientIDKey, net.Buffers{[]byte(clientID)})
+}
+
 // Volatile is an in-memory Store.
 type volatile struct {
 	sync.Mutex
 	perKey map[uint][]byte
 }
 
-func newVolatile(clientID string) Store {
-	store := &volatile{perKey: make(map[uint][]byte)}
-	if clientID != "" {
-		store.perKey[clientIDKey] = []byte(clientID)
+// NewVolatileStore returns a new in-memory session, ready for use. InitSession
+// is already applied to the Store. This setup is recommended for delivery with
+// the “at most once” guarantee [Publish], and/or for reception without the
+// “exactly once” guarantee [SubscribeLimitAtLeastOnce], and for testing.
+//
+// Brokers use clientID to uniquely identify the session. Volatile sessions may
+// be continued by using the same clientID again. Use CleanSession to prevent
+// reuse of an existing state.
+func NewVolatileStore(clientID string) Store {
+	return &Config{
+		Store: &volatile{perKey: map[uint][]byte{
+			clientIDKey: []byte(clientID),
+		}},
 	}
-	return store
 }
 
 // Load implements the Store interface.

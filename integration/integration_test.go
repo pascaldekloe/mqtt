@@ -46,16 +46,15 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	testMessage := []byte("Hello World!")
 	testTopic := fmt.Sprintf("test/race-%d", deliveryLevel)
 
-	client := mqtt.NewClient(&mqtt.ClientConfig{
-		Connecter: mqtt.UnsecuredConnecter("tcp", net.JoinHostPort(host, "1883")),
-
-		SessionConfig:  mqtt.NewVolatileSessionConfig(t.Name()),
-		BufSize:        1024,
+	client := mqtt.NewClient(&mqtt.Config{
+		Connecter:      mqtt.UnsecuredConnecter("tcp", net.JoinHostPort(host, "1883")),
 		WireTimeout:    time.Second,
+		BufSize:        1024,
+		Store:          mqtt.NewVolatileStore(t.Name()),
+		CleanSession:   true,
 		AtLeastOnceMax: testN,
 		ExactlyOnceMax: testN,
 	})
-	client.CleanSession = true
 
 	var wg sync.WaitGroup
 	t.Cleanup(func() {

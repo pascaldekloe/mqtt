@@ -70,12 +70,12 @@ func SecuredConnecter(network, address string, config *tls.Config) Connecter {
 	}
 }
 
-// ClientConfig is the configuration for a Client.
-// Clients can't share a configuration because they can't share the Store.
-type ClientConfig struct {
-	*SessionConfig
-
-	Connecter
+// Config is a Client configuration. Connecter and Store are the only required
+// fields, although a specific BufSize and a non-zero WireTimeout comes highly
+// recommended.
+type Config struct {
+	Connecter // chooses the broker
+	Store     // persists the session
 
 	// BufSize defines the read buffer capacity, which goes up to 256 MiB.
 	BufSize int
@@ -95,6 +95,118 @@ type ClientConfig struct {
 	// ErrMax. Zero effectively disables the respective quality-of-service
 	// level.
 	AtLeastOnceMax, ExactlyOnceMax int
+
+	// The user name may be used by the broker for authentication and/or
+	// authorization purposes. An empty string omits the option, except
+	// for when password is not nil.
+	UserName string
+	Password []byte // option omitted when nil
+
+	// The Will Message is published when the connection terminates
+	// without Disconnect. A nil Message disables the Will option.
+	Will struct {
+		Topic   string // destination
+		Message []byte // payload
+
+		Retain      bool // see PublishRetained
+		AtLeastOnce bool // see PublishAtLeastOnce
+		ExactlyOnce bool // overrides AtLeastOnce
+	}
+
+	KeepAlive uint16 // timeout in seconds (disabled with zero)
+
+	// Brokers must resume communications with the client (identified by
+	// ClientID) when CleanSession is false. Otherwise, brokers must create
+	// a new session when either CleanSession is true or when no session is
+	// associated to the client identifier.
+	CleanSession bool
+}
+
+// NewCONNREQ returns a new packet.
+func (c *Config) newCONNREQ() ([]byte, error) {
+	clientID, err := c.Load(clientIDKey)
+	if err != nil {
+		return nil, err
+	}
+	err = stringCheck(string(clientID))
+	if err != nil {
+		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
+	}
+
+	size := 12 + len(clientID)
+	var flags uint
+
+	if err := stringCheck(c.UserName); err != nil {
+		return nil, fmt.Errorf("mqtt: illegal user name: %w", err)
+	}
+	// Supply an empty user name when the password is set to comply with “If
+	// the User Name Flag is set to 0, the Password Flag MUST be set to 0.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.2-22
+	if c.UserName != "" || c.Password != nil {
+		size += 2 + len(c.UserName)
+		flags |= 1 << 7
+	}
+
+	if len(c.Password) > stringMax {
+		return nil, fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
+	}
+	if c.Password != nil {
+		size += 2 + len(c.Password)
+		flags |= 1 << 6
+	}
+
+	if c.Will.Message != nil {
+		if err := stringCheck(c.Will.Topic); err != nil {
+			return nil, fmt.Errorf("mqtt: illegal will topic: %w", err)
+		}
+		if len(c.Will.Message) > stringMax {
+			return nil, fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
+		}
+		size += 4 + len(c.Will.Topic) + len(c.Will.Message)
+		if c.Will.Retain {
+			flags |= 1 << 5
+		}
+		switch {
+		case c.Will.ExactlyOnce:
+			flags |= exactlyOnceLevel << 3
+		case c.Will.AtLeastOnce:
+			flags |= atLeastOnceLevel << 3
+		}
+		flags |= 1 << 2
+	}
+
+	if c.CleanSession {
+		flags |= 1 << 1
+	}
+
+	// encode packet
+	packet := make([]byte, 0, size+2)
+	packet = append(packet, typeCONNECT<<4)
+	l := uint(size)
+	for ; l > 0x7f; l >>= 7 {
+		packet = append(packet, byte(l|0x80))
+	}
+	packet = append(packet, byte(l),
+		0, 4, 'M', 'Q', 'T', 'T', 4, byte(flags),
+		byte(c.KeepAlive>>8), byte(c.KeepAlive),
+		byte(len(clientID)>>8), byte(len(clientID)),
+	)
+	packet = append(packet, clientID...)
+	if c.Will.Message != nil {
+		packet = append(packet, byte(len(c.Will.Topic)>>8), byte(len(c.Will.Topic)))
+		packet = append(packet, c.Will.Topic...)
+		packet = append(packet, byte(len(c.Will.Message)>>8), byte(len(c.Will.Message)))
+		packet = append(packet, c.Will.Message...)
+	}
+	if c.UserName != "" || c.Password != nil {
+		packet = append(packet, byte(len(c.UserName)>>8), byte(len(c.UserName)))
+		packet = append(packet, c.UserName...)
+	}
+	if c.Password != nil {
+		packet = append(packet, byte(len(c.Password)>>8), byte(len(c.Password)))
+		packet = append(packet, c.Password...)
+	}
+	return packet, nil
 }
 
 // Client manages a network connection. A single goroutine must invoke
@@ -104,7 +216,7 @@ type ClientConfig struct {
 // Multiple goroutines may invoke methods on a Conn simultaneously, except for
 // ReadSlices.
 type Client struct {
-	ClientConfig // read-only
+	Config // read-only
 
 	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
@@ -152,7 +264,13 @@ type Client struct {
 
 // NewClient returns a new Client. Configuration errors result in IsDeny on
 // ReadSlices.
-func NewClient(config *ClientConfig) *Client {
+func NewClient(config *Config) *Client {
+	if config.Connecter == nil {
+		panic("nil connecter")
+	}
+	if config.Store == nil {
+		panic("nil store")
+	}
 	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
 		config.AtLeastOnceMax = publishIDMask
@@ -160,13 +278,9 @@ func NewClient(config *ClientConfig) *Client {
 	if config.ExactlyOnceMax < 0 || config.ExactlyOnceMax > publishIDMask {
 		config.ExactlyOnceMax = publishIDMask
 	}
-	// apply defaults
-	if config.SessionConfig == nil {
-		config.SessionConfig = NewVolatileSessionConfig("")
-	}
 
 	c := &Client{
-		ClientConfig:   *config, // copy
+		Config:         *config, // copy
 		connSem:        make(chan net.Conn, 1),
 		writeSem:       make(chan net.Conn, 1),
 		writeBlock:     make(chan struct{}, 1),
