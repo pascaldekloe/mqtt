@@ -42,7 +42,7 @@ func init() {
 // It is good practice to install the client from main.
 func ExampleNewClient_setup() {
 	client := mqtt.NewClient(&mqtt.Config{
-		Dialer:      mqtt.UnsecuredDialer("tcp", "localhost:1883"),
+		Dialer:      mqtt.NewDialer("tcp", "localhost:1883"),
 		Store:       mqtt.NewVolatileStore("demo-client"),
 		WireTimeout: time.Second,
 		BufSize:     8192,

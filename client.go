@@ -47,9 +47,9 @@ var (
 // Dialer abstracts the transport layer establishment.
 type Dialer func(ctx context.Context) (net.Conn, error)
 
-// UnsecuredDialer creates plain network connections.
+// NewDialer provides plain network connections.
 // See net.Dial for details on the network & address syntax.
-func UnsecuredDialer(network, address string) Dialer {
+func NewDialer(network, address string) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		// minimize timer use; covered by WireTimeout
 		dialer := net.Dialer{KeepAlive: -1}
@@ -57,9 +57,9 @@ func UnsecuredDialer(network, address string) Dialer {
 	}
 }
 
-// SecuredDialer creates TLS network connections.
+// NewTLSDialer provides secured network connections.
 // See net.Dial for details on the network & address syntax.
-func SecuredDialer(network, address string, config *tls.Config) Dialer {
+func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		dialer := tls.Dialer{
 			// minimize timer use; covered by WireTimeout
