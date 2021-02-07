@@ -106,7 +106,7 @@ func ExampleNewClient_setup() {
 	// Output:
 }
 
-// Demo various error scenario and how to act uppon them.
+// Error scenario and how to act uppon them.
 func ExampleClient_PublishAtLeastOnce_hasty() {
 	for {
 		ack, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
@@ -124,9 +124,8 @@ func ExampleClient_PublishAtLeastOnce_hasty() {
 			continue
 
 		default:
-			backoff := time.Second
-			log.Printf("⚠️ alert retry in %s on: %s", backoff, err)
-			time.Sleep(backoff)
+			log.Print("⚠️ alert delay on persistence malfunction: ", err)
+			time.Sleep(time.Second)
 			continue
 		}
 
@@ -137,7 +136,7 @@ func ExampleClient_PublishAtLeastOnce_hasty() {
 				// is restarted with the same Store again.
 				return
 			}
-			log.Print("⚠️ alert delay: ", err)
+			log.Print("⚠️ alert delay on connection malfunction: ", err)
 		}
 		log.Print("alert confirmed")
 		break
@@ -145,7 +144,7 @@ func ExampleClient_PublishAtLeastOnce_hasty() {
 	// Output:
 }
 
-// Demo various error scenario and how to act uppon them.
+// Error scenario and how to act uppon them.
 func ExampleClient_Subscribe_sticky() {
 	const topicFilter = "demo/+"
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

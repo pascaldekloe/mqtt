@@ -1,3 +1,4 @@
+// Package main provides a command-line utility.
 package main
 
 import (
@@ -17,7 +18,7 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
-// ANSI escape codes for markup
+// ANSI escape codes for markup.
 const (
 	bold   = "\x1b[1m"
 	italic = "\x1b[3m"
@@ -27,7 +28,7 @@ const (
 // Name of the invoked executable.
 var name = os.Args[0]
 
-var subscribeFlags []string // defines subscription
+var subscribeFlags []string
 
 func init() {
 	flag.Func("subscribe", "Listen with a topic `filter`. Inbound messages are printed to\n"+italic+"standard output"+clear+" until interrupted by a signal(3). Multiple\n"+bold+"-subscribe"+clear+" options may be applied together.", func(value string) error {
@@ -36,7 +37,7 @@ func init() {
 	})
 }
 
-const generatedLabel = "<generated>"
+const generatedLabel = "generated"
 
 var (
 	publishFlag = flag.String("publish", "", "Send a message to a `topic`. The payload is read from "+italic+"standard\ninput"+clear+".")

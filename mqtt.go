@@ -176,7 +176,7 @@ const (
 	// Packet identifier zero is not in use by the protocol.
 	clientIDKey = 0
 
-	// Packet identifiers on outbound and inbound requests each have their
+	// Packet identifiers on inbound and outbound requests each have their
 	// own namespace. The most-significant bit on a Store key makes the
 	// distinction.
 	remoteIDKeyFlag = 1 << 16
@@ -220,7 +220,7 @@ func InitSession(store Store, clientID string) error {
 		return err
 	}
 	if len(keys) != 0 {
-		return errors.New("mqtt: store already in use [not empty]")
+		return errors.New("mqtt: store already initialized")
 	}
 
 	// install

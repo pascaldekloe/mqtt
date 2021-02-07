@@ -7,8 +7,8 @@
 
 … an MQTT client library for the Go programming language. Great care was taken
 to provide correctness in all scenario, including the error states. Message
-transfers in both directions do zero-copy. All errors are propagated through
-the API—no internal logging.
+transfers in both directions have zero-copy. All errors are propagated through
+the API. There is no internal logging by the client.
 
 The development was kindly sponsored by [Northvolt](https://northvolt.com), as a
 gift to the open-source community.
@@ -38,7 +38,7 @@ DESCRIPTION
 
 OPTIONS
   -client identifier
-    	Use a specific client identifier. (default "<generated>")
+    	Use a specific client identifier. (default "generated")
   -net name
     	Select the network by name. Valid alternatives include tcp4,
     	tcp6 and unix. (default "tcp")
