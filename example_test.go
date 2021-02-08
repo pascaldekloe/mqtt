@@ -45,11 +45,11 @@ func ExampleNewClient_setup() {
 		Dialer:      mqtt.NewDialer("tcp", "localhost:1883"),
 		Store:       mqtt.NewVolatileStore("demo-client"),
 		WireTimeout: time.Second,
-		BufSize:     8192,
 	})
 
 	// launch read-routine
 	go func() {
+		var big *mqtt.BigMessage
 		for {
 			message, channel, err := client.ReadSlices()
 			switch {
@@ -62,6 +62,9 @@ func ExampleNewClient_setup() {
 
 			case mqtt.IsDeny(err):
 				log.Fatal(err) // faulty configuration
+
+			case errors.As(err, &big):
+				log.Printf("%d byte content skipped", big.Size)
 
 			case mqtt.IsConnectionRefused(err):
 				log.Print(err)

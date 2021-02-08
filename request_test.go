@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,6 +71,10 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 
 		for {
 			message, topic, err := client.ReadSlices()
+			if big := (*BigMessage)(nil); errors.As(err, &big) {
+				topic = []byte(big.Topic)
+				message, err = big.ReadAll()
+			}
 			switch {
 			case err == nil:
 				switch {
@@ -245,6 +250,21 @@ func TestReceivePublishExactlyOnce(t *testing.T) {
 	wantPacketHex(t, conn, "5002abcd") // PUBREC
 	sendPacketHex(t, conn, "6002abcd") // PUBREL
 	wantPacketHex(t, conn, "7002abcd") // PUBCOMP
+}
+
+func TestReceivePublishAtLeastOnceBig(t *testing.T) {
+	const bigN = 256 * 1024
+	if bigN <= readBufSize {
+		t.Fatal("test sample does not exceed the read buffer")
+	}
+
+	_, conn := newClientPipe(t, reception{Message: strings.Repeat("A", bigN), Topic: "bam"})
+
+	sendPacketHex(t, conn, hex.EncodeToString([]byte{
+		0x32, 0x87, 0x80, 0x10,
+		0, 3, 'b', 'a', 'm',
+		0xab, 0xcd})+strings.Repeat("41", bigN))
+	wantPacketHex(t, conn, "4002abcd") // PUBACK
 }
 
 func testAckErrors(t *testing.T, ack <-chan error, want ...error) {

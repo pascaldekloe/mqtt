@@ -49,7 +49,6 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	client := mqtt.NewClient(&mqtt.Config{
 		Dialer:         mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")),
 		WireTimeout:    time.Second,
-		BufSize:        1024,
 		Store:          mqtt.NewVolatileStore(t.Name()),
 		CleanSession:   true,
 		AtLeastOnceMax: testN,

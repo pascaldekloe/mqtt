@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+// ReadBufSize covers inbound packet reception. BigMessage still uses the buffer
+// to parse everything up until the message payload, which makes a worst-case of
+// 2 B size prefix + 64 KiB topic + 2 B packet identifier.
+var readBufSize = 128 * 1024
+
 // ErrDown signals no-service after a failed connect attempt.
 // The error state will clear once a connect retry succeeds.
 var ErrDown = errors.New("mqtt: connection unavailable")
@@ -71,14 +76,10 @@ func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 }
 
 // Config is a Client configuration. Dialer and Store are the only required
-// fields, although a specific BufSize and a non-zero WireTimeout comes highly
-// recommended.
+// fields, although the WireTimeout comes highly recommended.
 type Config struct {
 	Dialer // chooses the broker
 	Store  // persists the session
-
-	// BufSize defines the read buffer capacity, which goes up to 256 MiB.
-	BufSize int
 
 	// WireTimeout sets the minimim transfer rate as one byte per duration.
 	// Zero disables timeout protection, which leaves the Client vulnerable
@@ -259,6 +260,8 @@ type Client struct {
 
 	// The read routine uses this reusable buffer for packet submission.
 	pendingAck [4]byte
+	// The read routine parks reception beyond readBufSize.
+	bigMessage *BigMessage
 }
 
 // NewClient returns a new Client. Configuration errors result in IsDeny on
@@ -625,13 +628,13 @@ func (c *Client) peekPacket() (head byte, err error) {
 		}
 
 		lastN := len(c.peek)
-		c.peek, err = c.r.Peek(int(size))
-		if err == nil { // OK
-			return head, nil
+		c.peek, err = c.r.Peek(size)
+		switch {
+		case err == nil: // OK
+			return head, err
+		case head>>4 == typePUBLISH && errors.Is(err, bufio.ErrBufferFull):
+			return head, &BigMessage{Client: c, Size: size}
 		}
-
-		// TODO(pascaldekloe): if errors.Is(err, bufio.ErrBufferFull) {
-		//	return head, BigPacketError{c, io.MultiReader(bytes.NewReader(c.peek), io.LimitReader(c.r, l-len(c.peek)))}
 
 		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
@@ -706,7 +709,7 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 		return nil, err
 	}
 
-	r := bufio.NewReaderSize(conn, c.BufSize)
+	r := bufio.NewReaderSize(conn, readBufSize)
 
 	// Apply the deadline to the "entire" 4-byte response.
 	if c.WireTimeout != 0 {
@@ -747,9 +750,18 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 // Alternatively, use either Disconnect or Close to prevent a confirmation from
 // being send.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
-	// skip previous packet, if any
-	c.r.Discard(len(c.peek)) // no errors guaranteed
-	c.peek = nil             // flush
+	if len(c.peek) != 0 {
+		// skip previous packet, if any
+		c.r.Discard(len(c.peek)) // no errors guaranteed
+		c.peek = nil             // flush
+	}
+	if c.bigMessage != nil {
+		_, err = c.r.Discard(c.bigMessage.Size)
+		if err != nil {
+			c.block()
+			return nil, nil, err
+		}
+	}
 
 	if c.readConn == nil {
 		if err := c.connect(); err != nil {
@@ -780,18 +792,40 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 
 	// process packets until a PUBLISH appears
 	for {
+		var bigp *BigMessage
 		head, err := c.peekPacket()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
-				// got interrupted
-				if err := c.connect(); err != nil {
-					c.readConn = nil
-					return nil, nil, err
-				}
+		switch {
+		case err == nil:
+			break
 
-				continue // with new connection
+		case errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe):
+			// got interrupted
+			if err := c.connect(); err != nil {
+				c.readConn = nil
+				return nil, nil, err
 			}
 
+			continue // with new connection
+
+		case errors.As(err, &bigp):
+			if head>>4 == typePUBLISH {
+				message, topic, err = c.onPUBLISH(head)
+				if err != nil {
+					// If the packet is malformed then
+					// bigp is not the issue anymore.
+					c.block()
+					return nil, nil, err
+				}
+				bigp.Topic = string(topic) // copy
+				done := readBufSize - len(message)
+				bigp.Size -= done
+				c.r.Discard(done) // no errors guaranteed
+			}
+			c.peek = nil
+			c.bigMessage = bigp
+			return nil, nil, bigp
+
+		default:
 			c.block()
 			return nil, nil, err
 		}
@@ -859,6 +893,38 @@ func (c *Client) block() {
 	}
 	c.writeBlock <- struct{}{}
 	c.readConn = nil
+}
+
+// BigMessage signals reception beyond the read buffer capacity.
+// Receivers may or may not allocate the memory with ReadAll.
+// The next ReadSlices will acknowledge reception either way.
+type BigMessage struct {
+	*Client        // source
+	Topic   string // destinition
+	Size    int    // byte count
+}
+
+// Error implements the standard error interface.
+func (e *BigMessage) Error() string {
+	return fmt.Sprintf("mqtt: %d B message exceeds read buffer capacity", e.Size)
+}
+
+// ReadAll returns the message in a new/dedicated buffer. Messages can be read
+// only once, after reception (from ReadSlices), and before the next ReadSlices.
+// The invocation must occur from within the read-routine.
+func (e *BigMessage) ReadAll() ([]byte, error) {
+	if e.bigMessage != e {
+		return nil, errors.New("mqtt: read window expired for a big message")
+	}
+	e.bigMessage = nil
+
+	message := make([]byte, e.Size)
+	_, err := io.ReadFull(e.Client.r, message)
+	if err != nil {
+		e.Client.block()
+		return nil, err
+	}
+	return message, nil
 }
 
 var errDupe = errors.New("mqtt: duplicate reception")

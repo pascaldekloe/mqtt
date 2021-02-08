@@ -218,25 +218,26 @@ func main() {
 
 	// read routine
 	for {
+		var big *mqtt.BigMessage
 		message, topic, err := client.ReadSlices()
 		switch {
 		case err == nil:
-			switch {
-			case *topicFlag && *quoteFlag:
-				fmt.Printf("%q%s%q%s", topic, *prefixFlag, message, *suffixFlag)
-			case *topicFlag:
-				fmt.Printf("%s%s%s%s", topic, *prefixFlag, message, *suffixFlag)
-			case *quoteFlag:
-				fmt.Printf("%s%q%s", *prefixFlag, message, *suffixFlag)
-			default:
-				fmt.Printf("%s%s%s", *prefixFlag, message, *suffixFlag)
-			}
+			printMessage(message, topic)
 
 		case errors.Is(err, mqtt.ErrClosed):
 			os.Exit(<-exitStatus)
 
 		case mqtt.IsDeny(err): // illegal configuration
 			log.Fatal(err)
+
+		case errors.As(err, &big):
+			message, err := big.ReadAll()
+			if err != nil {
+				log.Print(err)
+				exit(1)
+				return
+			}
+			printMessage(message, big.Topic)
 
 		default:
 			log.Print(err)
@@ -254,8 +255,22 @@ func main() {
 				os.Exit(9)
 			}
 
-			go exit(1)
+			exit(1)
+			return
 		}
+	}
+}
+
+func printMessage(message, topic interface{}) {
+	switch {
+	case *topicFlag && *quoteFlag:
+		fmt.Printf("%q%s%q%s", topic, *prefixFlag, message, *suffixFlag)
+	case *topicFlag:
+		fmt.Printf("%s%s%s%s", topic, *prefixFlag, message, *suffixFlag)
+	case *quoteFlag:
+		fmt.Printf("%s%q%s", *prefixFlag, message, *suffixFlag)
+	default:
+		fmt.Printf("%s%s%s", *prefixFlag, message, *suffixFlag)
 	}
 }
 
