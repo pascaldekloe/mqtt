@@ -615,16 +615,18 @@ func (c *Client) peekPacket() (head byte, err error) {
 		if b&0x80 == 0 {
 			break
 		}
-		if shift > 24 {
+		if shift > 21 {
 			return 0, fmt.Errorf("%w: remaining length encoding from packet %#b exceeds 4 bytes", errProtoReset, head)
 		}
 	}
 
 	// slice payload form read buffer
 	for {
-		err := c.readConn.SetReadDeadline(time.Now().Add(c.WireTimeout))
-		if err != nil {
-			return 0, err // deemed critical
+		if c.r.Buffered() < size {
+			err := c.readConn.SetReadDeadline(time.Now().Add(c.WireTimeout))
+			if err != nil {
+				return 0, err // deemed critical
+			}
 		}
 
 		lastN := len(c.peek)
@@ -671,10 +673,6 @@ func (c *Client) connect() error {
 	if oldConn != nil && c.CleanSession {
 		c.CleanSession = false
 	}
-	// “After a Network Connection is established by a Client to a Server,
-	// the first Packet sent from the Client to the Server MUST be a CONNECT
-	// Packet.”
-	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
 	conn, err := c.Dialer(c.dialCtx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
@@ -685,6 +683,10 @@ func (c *Client) connect() error {
 		}
 		return err
 	}
+	// “After a Network Connection is established by a Client to a Server,
+	// the first Packet sent from the Client to the Server MUST be a CONNECT
+	// Packet.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
 
 	c.connSem <- conn // release early for interruption by Close
 
@@ -696,8 +698,8 @@ func (c *Client) connect() error {
 	}
 
 	// install
-	c.readConn = conn
 	c.writeSem <- conn
+	c.readConn = conn
 	c.r = r
 	c.peek = nil // applied to prevous r if any
 	return nil
@@ -741,7 +743,8 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	return r, err
 }
 
-// ReadSlices MUST be invoked consecutively from a single goroutine.
+// ReadSlices should be invoked consecutively from a single goroutine until
+// ErrClosed. An IsDeny implies permantent Config rejection.
 //
 // Both message and topic are slices from a read buffer. The bytes stop being
 // valid at the next read.
@@ -749,34 +752,40 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 // Each invocation acknowledges ownership of the previously returned if any.
 // Alternatively, use either Disconnect or Close to prevent a confirmation from
 // being send.
+//
+// BigMessage leaves the memory allocation choice to the consumer. Any other
+// error puts the Client in an ErrDown state. Invocation should apply a backoff
+// once down. Retries on IsConnectionRefused, if any, should probably apply a
+// rather large backoff. See the NewClient example for a complete setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
-	if len(c.peek) != 0 {
-		// skip previous packet, if any
-		c.r.Discard(len(c.peek)) // no errors guaranteed
-		c.peek = nil             // flush
-	}
-	if c.bigMessage != nil {
+	// A pending BigMessage implies that the connection was functional on
+	// the last return.
+	switch {
+	case c.bigMessage != nil:
 		_, err = c.r.Discard(c.bigMessage.Size)
 		if err != nil {
 			c.block()
 			return nil, nil, err
 		}
-	}
 
-	if c.readConn == nil {
+	case c.readConn == nil:
 		if err := c.connect(); err != nil {
 			return nil, nil, err
 		}
+
+	default:
+		// skip previous packet, if any
+		c.r.Discard(len(c.peek)) // no errors guaranteed
+		c.peek = nil             // flush
 	}
 
 	// acknowledge previous packet, if any
 	if c.pendingAck[0] != 0 {
 		if c.pendingAck[0]&0xf0 == typePUBREC<<4 {
-			// BUG(pascaldekloe): Store errors from a persistence
-			// may cause duplicate reception on quality-of-service
-			// level 2—breaking the "exactly once guarantee"—when
-			// the respective Client goes down before the recovery
-			// succeeds.
+			// BUG(pascaldekloe): Save errors from a Store may cause
+			// duplicate reception for deliveries with the "exactly
+			// once guarantee", if the respective Client goes down
+			// before a recovery/retry succeeds.
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.Store.Save(key, net.Buffers{c.pendingAck[:]})
 			if err != nil {
@@ -792,7 +801,6 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 
 	// process packets until a PUBLISH appears
 	for {
-		var bigp *BigMessage
 		head, err := c.peekPacket()
 		switch {
 		case err == nil:
@@ -807,23 +815,24 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 
 			continue // with new connection
 
-		case errors.As(err, &bigp):
+		case errors.As(err, &c.bigMessage):
 			if head>>4 == typePUBLISH {
 				message, topic, err = c.onPUBLISH(head)
+				// TODO(pascaldekloe): errDupe
 				if err != nil {
 					// If the packet is malformed then
-					// bigp is not the issue anymore.
+					// BigMessage is not the issue anymore.
+					c.bigMessage = nil
 					c.block()
 					return nil, nil, err
 				}
-				bigp.Topic = string(topic) // copy
+				c.bigMessage.Topic = string(topic) // copy
 				done := readBufSize - len(message)
-				bigp.Size -= done
+				c.bigMessage.Size -= done
 				c.r.Discard(done) // no errors guaranteed
 			}
 			c.peek = nil
-			c.bigMessage = bigp
-			return nil, nil, bigp
+			return nil, nil, c.bigMessage
 
 		default:
 			c.block()
@@ -911,7 +920,7 @@ func (e *BigMessage) Error() string {
 
 // ReadAll returns the message in a new/dedicated buffer. Messages can be read
 // only once, after reception (from ReadSlices), and before the next ReadSlices.
-// The invocation must occur from within the read-routine.
+// The invocation must occur from within the same routine.
 func (e *BigMessage) ReadAll() ([]byte, error) {
 	if e.bigMessage != e {
 		return nil, errors.New("mqtt: read window expired for a big message")
@@ -981,13 +990,13 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
 
 	default:
-		return nil, nil, fmt.Errorf("%w: PUBLISH with reserved quality-of-service level", errProtoReset)
+		return nil, nil, fmt.Errorf("%w: PUBLISH with reserved quality-of-service level 3", errProtoReset)
 	}
 
 	return c.peek[i:], topic, nil
 }
 
-// OnPUBREL applies the second round trip for “exactly-once” reception.
+// OnPUBREL applies the second round-trip for “exactly-once” reception.
 func (c *Client) onPUBREL() error {
 	if len(c.peek) != 2 {
 		return fmt.Errorf("%w: PUBREL with %d byte remaining length", errProtoReset, len(c.peek))
