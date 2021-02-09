@@ -241,7 +241,6 @@ type Client struct {
 
 	// The semaphore allows for ordered output, as required by the protocol.
 	writeSem chan net.Conn
-
 	// Writes signal the block channel on fatal errors, leaving writeSem
 	// empty/locked. The connection must be closed (if it wasn't already).
 	writeBlock chan struct{}
@@ -252,6 +251,9 @@ type Client struct {
 	// The semaphores lock the respective acknowledge queues with a
 	// submission counter. Overflows are acceptable.
 	atLeastOnceSem, exactlyOnceSem chan uint
+	// Submissions signal the block channel on errors, leaving the
+	// respective semaphore empty/locked.
+	atLeastOnceBlock, exactlyOnceBlock chan holdup
 
 	// Outbout PUBLISH acknowledgement is traced by a callback channel.
 	ackQ, recQ, compQ chan chan<- error

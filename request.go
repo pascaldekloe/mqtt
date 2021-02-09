@@ -403,6 +403,11 @@ type orderedTxs struct {
 	Completed uint // confirm count 2/2 for PublishExactlyOnce
 }
 
+type holdup struct {
+	Since uint // packet identifier of oldest entry
+	Until uint // packet identifier of newest entry
+}
+
 // Publish delivers the message with an “at most once” guarantee.
 // Subscribers may or may not receive the message when subject to error.
 // This delivery method is the most efficient option.
@@ -410,7 +415,13 @@ type orderedTxs struct {
 // Quit is optional, as nil just blocks. Appliance of quit will strictly result
 // in ErrCanceled.
 func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) error {
-	return c.publish(quit, message, topic, 0)
+	buf := bufPool.Get().(*[bufSize]byte)
+	defer bufPool.Put(buf)
+	packet, err := appendPublishPacket(buf, message, topic, 0, typePUBLISH<<4)
+	if err != nil {
+		return err
+	}
+	return c.writeAll(quit, packet)
 }
 
 // PublishRetained is like Publish, but the broker should store the message, so
@@ -419,7 +430,13 @@ func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) err
 // Uppon reception, the broker must discard any message previously retained for
 // the topic name.
 func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic string) error {
-	return c.publish(quit, message, topic, retainFlag)
+	buf := bufPool.Get().(*[bufSize]byte)
+	defer bufPool.Put(buf)
+	packet, err := appendPublishPacket(buf, message, topic, 0, typePUBLISH<<4|retainFlag)
+	if err != nil {
+		return err
+	}
+	return c.writeAll(quit, packet)
 }
 
 // PublishAtLeastOnce delivers the message with an “at least once” guarantee.
@@ -431,7 +448,13 @@ func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic str
 // ErrClosed leaves the channel blocked (with no further input). A blocked send
 // from ReadSlices causes the error to be returned instead.
 func (c *Client) PublishAtLeastOnce(message []byte, topic string) (ack <-chan error, err error) {
-	return c.publishAtLeastOnceRetained(message, topic, 0)
+	buf := bufPool.Get().(*[bufSize]byte)
+	defer bufPool.Put(buf)
+	packet, err := appendPublishPacket(buf, message, topic, atLeastOnceIDSpace, typePUBLISH<<4|atLeastOnceLevel<<1)
+	if err != nil {
+		return nil, err
+	}
+	return c.submitPersisted(packet, c.atLeastOnceSem, c.ackQ, nil, c.atLeastOnceBlock)
 }
 
 // PublishAtLeastOnceRetained is like PublishAtLeastOnce, but the broker must
@@ -440,14 +463,26 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string) (ack <-chan er
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
 func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
-	return c.publishAtLeastOnceRetained(message, topic, retainFlag)
+	buf := bufPool.Get().(*[bufSize]byte)
+	defer bufPool.Put(buf)
+	packet, err := appendPublishPacket(buf, message, topic, atLeastOnceIDSpace, typePUBLISH<<4|atLeastOnceLevel<<1|retainFlag)
+	if err != nil {
+		return nil, err
+	}
+	return c.submitPersisted(packet, c.atLeastOnceSem, c.ackQ, nil, c.atLeastOnceBlock)
 }
 
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
 // This delivery method eliminates the duplicate-delivery risk from
 // PublishAtLeastOnce at the expense of an additional network roundtrip.
 func (c *Client) PublishExactlyOnce(message []byte, topic string) (ack <-chan error, err error) {
-	return c.publishExactlyOnceRetained(message, topic, 0)
+	buf := bufPool.Get().(*[bufSize]byte)
+	defer bufPool.Put(buf)
+	packet, err := appendPublishPacket(buf, message, topic, exactlyOnceIDSpace, typePUBLISH<<4|exactlyOnceLevel<<1)
+	if err != nil {
+		return nil, err
+	}
+	return c.submitPersisted(packet, c.exactlyOnceSem, c.recQ, c.compQ, c.exactlyOnceBlock)
 }
 
 // PublishExactlyOnceRetained is like PublishExactlyOnce, but the broker must
@@ -456,101 +491,94 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string) (ack <-chan er
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
 func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
-	return c.publishExactlyOnceRetained(message, topic, retainFlag)
-}
-
-func (c *Client) publishAtLeastOnceRetained(message []byte, topic string, flags byte) (ack <-chan error, err error) {
-	counter, ok := <-c.atLeastOnceSem
-	if !ok {
-		return nil, ErrClosed
-	}
-	if cap(c.ackQ)-len(c.ackQ) == 0 {
-		c.exactlyOnceSem <- counter
-		return nil, ErrMax
-	}
-	ack, err = c.publishPersisted(message, topic, counter&publishIDMask|atLeastOnceIDSpace, atLeastOnceLevel<<1|flags, c.ackQ, &counter)
-	c.atLeastOnceSem <- counter
-	return
-}
-
-func (c *Client) publishExactlyOnceRetained(message []byte, topic string, flags byte) (ack <-chan error, err error) {
-	counter, ok := <-c.exactlyOnceSem
-	if !ok {
-		return nil, ErrClosed
-	}
-	if cap(c.recQ)-len(c.recQ)-len(c.compQ) == 0 {
-		c.exactlyOnceSem <- counter
-		return nil, ErrMax
-	}
-	ack, err = c.publishPersisted(message, topic, counter&publishIDMask|exactlyOnceIDSpace, exactlyOnceLevel<<1|flags, c.recQ, &counter)
-	c.exactlyOnceSem <- counter
-	return
-}
-
-// ⚠️ Keep synchronised with publishPersisted.
-func (c *Client) publish(quit <-chan struct{}, message []byte, topic string, flags byte) error {
-	if err := stringCheck(topic); err != nil {
-		return fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
-	}
-	size := 2 + len(topic) + len(message)
-	if size < 0 || size > packetMax {
-		return fmt.Errorf("mqtt: PUBLISH denied: %w", errPacketMax)
-	}
-
-	// build request
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
-	head := append(buf[:0], typePUBLISH<<4|flags)
-	l := uint(size)
-	for ; l > 0x7f; l >>= 7 {
-		head = append(head, byte(l|0x80))
+	packet, err := appendPublishPacket(buf, message, topic, exactlyOnceIDSpace, typePUBLISH<<4|exactlyOnceLevel<<1|retainFlag)
+	if err != nil {
+		return nil, err
 	}
-	head = append(head, byte(l))
-	head = append(head, byte(len(topic)>>8), byte(len(topic)))
-	head = append(head, topic...)
-
-	// submit
-	return c.writeAll(quit, net.Buffers{head, message})
+	return c.submitPersisted(packet, c.exactlyOnceSem, c.recQ, c.compQ, c.exactlyOnceBlock)
 }
 
-// ⚠️ Keep synchronised sync with publish.
-func (c *Client) publishPersisted(message []byte, topic string, packetID uint, flags byte, queue chan<- chan<- error, counter *uint) (ack <-chan error, err error) {
+func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 chan chan<- error, block chan holdup) (ack <-chan error, err error) {
+	done := make(chan error, 2)
+	select {
+	case counter, ok := <-sem:
+		if !ok {
+			return nil, ErrClosed
+		}
+		if cap(ackQ) == len(ackQ)+len(ackQ2) {
+			sem <- counter // unlock
+			return nil, ErrMax
+		}
+		packetID := applyPublishSeqNo(packet, counter)
+		err = c.Store.Save(packetID, packet)
+		if err != nil {
+			sem <- counter // unlock
+			return nil, err
+		}
+		ackQ <- done // won't block due ErrMax check
+		if err := c.writeAll(nil, packet); err != nil {
+			done <- err
+			block <- holdup{counter, counter}
+		} else {
+			sem <- counter + 1
+		}
+
+	case holdup := <-block:
+		if cap(ackQ) == len(ackQ)+len(ackQ2) {
+			block <- holdup // unlock
+			return nil, ErrMax
+		}
+		packetID := applyPublishSeqNo(packet, holdup.Until+1)
+		err = c.Store.Save(packetID, packet)
+		if err != nil {
+			block <- holdup // unlock
+			return nil, err
+		}
+		ackQ <- done // won't block due ErrMax check
+		holdup.Until++
+		c.atLeastOnceBlock <- holdup
+	}
+
+	return done, nil
+}
+
+func appendPublishPacket(buf *[bufSize]byte, message []byte, topic string, packetID uint, head byte) (net.Buffers, error) {
 	if err := stringCheck(topic); err != nil {
 		return nil, fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
 	}
-	size := 4 + len(topic) + len(message)
+	size := 2 + len(topic) + len(message)
+	if packetID != 0 {
+		size += 2
+	}
 	if size < 0 || size > packetMax {
 		return nil, fmt.Errorf("mqtt: PUBLISH denied: %w", errPacketMax)
 	}
 
-	// build request
-	buf := bufPool.Get().(*[bufSize]byte)
-	defer bufPool.Put(buf)
-	head := append(buf[:0], typePUBLISH<<4|flags)
+	packet := append(buf[:0], head)
 	l := uint(size)
 	for ; l > 0x7f; l >>= 7 {
-		head = append(head, byte(l|0x80))
+		packet = append(packet, byte(l|0x80))
 	}
-	head = append(head, byte(l))
-	head = append(head, byte(len(topic)>>8), byte(len(topic)))
-	head = append(head, topic...)
-	head = append(head, byte(packetID>>8), byte(packetID))
-	packet := net.Buffers{head, message}
+	packet = append(packet, byte(l))
+	packet = append(packet, byte(len(topic)>>8), byte(len(topic)))
+	packet = append(packet, topic...)
+	if packetID != 0 {
+		packet = append(packet, byte(packetID>>8), byte(packetID))
+	}
+	return net.Buffers{packet, message}, nil
+}
 
-	err = c.Store.Save(packetID, packet)
-	if err != nil {
-		return nil, err
-	}
-
-	// commit
-	done := make(chan error, 2)
-	queue <- done
-	*counter++
-	// submit
-	if err := c.writeAll(nil, packet); err != nil {
-		done <- err
-	}
-	return done, nil
+// ApplyPublishSeqNo applies a sequence number to a appendPublishPublishPacket
+// composition.
+func applyPublishSeqNo(packet net.Buffers, seqNo uint) (packetID uint) {
+	buf := packet[0]
+	i := len(buf) - 2
+	packetID = uint(binary.BigEndian.Uint16(buf[i:]))
+	packetID |= seqNo & publishIDMask
+	binary.BigEndian.PutUint16(buf[i:], uint16(packetID))
+	return packetID
 }
 
 // OnPUBACK applies the confirm of a PublishAtLeastOnce.
