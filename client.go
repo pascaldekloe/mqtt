@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -677,8 +678,9 @@ func (c *Client) connect() error {
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
-		// See <https://github.com/golang/go/issues/36208>.
-		if c.dialCtx.Err() != nil {
+		// FIXME(pascaldekloe): Error string matching is supported
+		// according to <https://github.com/golang/go/issues/36208>.
+		if strings.Contains(err.Error(), "operation was canceled") {
 			return ErrClosed
 		}
 		return err
