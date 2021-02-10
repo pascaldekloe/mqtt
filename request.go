@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 )
 
@@ -120,6 +121,9 @@ const (
 	subscribeIDSpace   = 0x6000
 	unsubscribeIDSpace = 0x4000
 )
+
+// Packet identifier zero is not in use by the protocol.
+const clientIDKey = 0
 
 // ErrPacketIDSpace signals a response packet with an identifier outside of the
 // respective address spaces, defined by subscribeIDSpace, unsubscribeIDSpace,
@@ -512,7 +516,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, ErrMax
 		}
 		packetID := applyPublishSeqNo(packet, counter)
-		err = c.Store.Save(packetID, packet)
+		err = c.store.Save(packetID, packet)
 		if err != nil {
 			sem <- counter // unlock
 			return nil, err
@@ -531,7 +535,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, ErrMax
 		}
 		packetID := applyPublishSeqNo(packet, holdup.Until+1)
-		err = c.Store.Save(packetID, packet)
+		err = c.store.Save(packetID, packet)
 		if err != nil {
 			block <- holdup // unlock
 			return nil, err
@@ -587,7 +591,7 @@ func (c *Client) onPUBACK() error {
 	if len(c.peek) != 2 {
 		return fmt.Errorf("%w: PUBACK with %d byte remaining length", errProtoReset, len(c.peek))
 	}
-	packetID := binary.BigEndian.Uint16(c.peek)
+	packetID := uint(binary.BigEndian.Uint16(c.peek))
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
@@ -600,12 +604,12 @@ func (c *Client) onPUBACK() error {
 		return nil // tolerates wandering PUBACK
 	}
 	expect := c.orderedTxs.Acked&publishIDMask | atLeastOnceIDSpace
-	if expect != uint(packetID) {
+	if expect != packetID {
 		return fmt.Errorf("mqtt: PUBACK %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.ackQ))
 	}
 
 	// ceil transaction
-	err := c.Store.Delete(uint(packetID))
+	err := c.store.Delete(packetID)
 	if err != nil {
 		return err // causes resubmission of PUBLISH
 	}
@@ -620,7 +624,7 @@ func (c *Client) onPUBREC() error {
 	if len(c.peek) != 2 {
 		return fmt.Errorf("%w: PUBREC with %d byte remaining length", errProtoReset, len(c.peek))
 	}
-	packetID := binary.BigEndian.Uint16(c.peek)
+	packetID := uint(binary.BigEndian.Uint16(c.peek))
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
@@ -633,14 +637,15 @@ func (c *Client) onPUBREC() error {
 		return nil // tolerates wandering PUBREC
 	}
 	expect := c.orderedTxs.Received&publishIDMask | exactlyOnceIDSpace
-	if uint(packetID) != expect {
+	if packetID != expect {
 		return fmt.Errorf("mqtt: PUBREC %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.recQ))
 	}
 
 	// ceil receive with progress to release
-	c.pendingAck[0], c.pendingAck[1] = typePUBREL<<4|atLeastOnceLevel<<1, 2
-	c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
-	err := c.Store.Save(uint(packetID), net.Buffers{c.pendingAck[:4]})
+	c.readBuf[0], c.readBuf[1] = typePUBREL<<4|atLeastOnceLevel<<1, 2
+	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
+	c.pendingAck = c.readBuf[:4]
+	err := c.store.Save(packetID, net.Buffers{c.pendingAck})
 	if err != nil {
 		return err // causes resubmission of PUBLISH (from persistence)
 	}
@@ -648,11 +653,11 @@ func (c *Client) onPUBREC() error {
 	c.compQ <- <-c.recQ
 
 	// errors cause resubmission of PUBREL (from persistence)
-	err = c.write(nil, c.pendingAck[:4])
+	err = c.write(nil, c.pendingAck)
 	if err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint32(c.pendingAck[:4], 0) // clear
+	c.pendingAck = nil
 	return nil
 }
 
@@ -675,16 +680,210 @@ func (c *Client) onPUBCOMP() error {
 		return nil // tolerates wandering PUBCOMP
 	}
 	expect := c.orderedTxs.Completed&publishIDMask | exactlyOnceIDSpace
-	if uint(packetID) != expect {
+	if packetID != expect {
 		return fmt.Errorf("mqtt: PUBCOMP %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.compQ))
 	}
 
 	// ceil transaction
-	err := c.Store.Delete(uint(packetID))
+	err := c.store.Delete(packetID)
 	if err != nil {
 		return err // causes resubmission of PUBREL (from persistence)
 	}
 	c.orderedTxs.Completed++
 	close(<-c.compQ)
+	return nil
+}
+
+var errInitTwo = errors.New("mqtt: session already initialized")
+
+// InitSession configures the Store for first use. Brokers use clientID to
+// uniquely identify the session. The session may be continued by using the same
+// Store (content) again with AdoptSession on another Client.
+func (c *Client) InitSession(store Store, clientID string) error {
+	return c.initSession(&ruggedStore{Store: store}, clientID)
+}
+
+// VolatileSession applies an in-memory Store. This setup is recommended for
+// delivery with the “at most once” guarantee [Publish], and/or for reception
+// without the “exactly once” guarantee [SubscribeLimitAtLeastOnce], and for
+// testing.
+//
+// Brokers use clientID to uniquely identify the session. Volatile sessions may
+// be continued by using the same clientID again. Use CleanSession to prevent
+// reuse of an existing state.
+func (c *Client) VolatileSession(clientID string) error {
+	return c.initSession(newVolatileStore(), clientID)
+}
+
+func (c *Client) initSession(store Store, clientID string) error {
+	if err := stringCheck(clientID); err != nil {
+		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
+	}
+	if c.store != nil {
+		return errInitTwo
+	}
+
+	// empty check
+	keys, err := store.List()
+	if err != nil {
+		return err
+	}
+	if len(keys) != 0 {
+		return errors.New("mqtt: store already initialized")
+	}
+
+	// install
+	err = store.Save(clientIDKey, net.Buffers{[]byte(clientID)})
+	if err != nil {
+		return err
+	}
+	c.store = store
+	c.writeBlock <- struct{}{}
+	c.atLeastOnceSem <- 0
+	c.exactlyOnceSem <- 0
+	return nil
+}
+
+// AdoptSession continues the session with a Store which had an InitSession once
+// (with another Client).
+func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
+	if c.store != nil {
+		return warn, errInitTwo
+	}
+
+	keys, err := store.List()
+	if err != nil {
+		return warn, err
+	}
+	seqNos := make(seqNos, len(keys))
+	keyPerSeqNo := make(map[uint64]uint, len(keys))
+	PUBRELPerKey := make(map[uint][]byte)
+	for _, key := range keys {
+		if key == clientIDKey || key&remoteIDKeyFlag != 0 {
+			continue
+		}
+		value, err := store.Load(key)
+		if err != nil {
+			return warn, err
+		}
+
+		switch packet, seqNo, ok := decodeStoreContent(value); {
+		case !ok:
+			err := store.Delete(key)
+			if err != nil {
+				warn = append(warn, fmt.Errorf("mqtt: corrupt record %d not deleted: %s", key, err))
+			} else {
+				warn = append(warn, fmt.Errorf("mqtt: corrupt record %d deleted", key))
+			}
+
+		case len(packet) == 0:
+			err := store.Delete(key)
+			if err != nil {
+				warn = append(warn, fmt.Errorf("mqtt: somehow empty record %d not deleted: %s", key, err))
+			} else {
+				warn = append(warn, fmt.Errorf("mqtt: somehow empty record %d deleted", key))
+			}
+
+		default:
+			seqNos = append(seqNos, seqNo)
+			keyPerSeqNo[seqNo] = key
+			if packet[0]>>4 == typePUBREL {
+				PUBRELPerKey[key] = packet
+			}
+		}
+	}
+
+	var atLeastOnceKeys, exactlyOnceKeys []uint
+	sort.Sort(seqNos)
+	for _, seqNo := range seqNos {
+		switch seqNo &^ publishIDMask {
+		case atLeastOnceIDSpace:
+			atLeastOnceKeys = append(atLeastOnceKeys, keyPerSeqNo[seqNo])
+		case exactlyOnceIDSpace:
+			exactlyOnceKeys = append(exactlyOnceKeys, keyPerSeqNo[seqNo])
+		}
+	}
+	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", c.store, &warn)
+	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", c.store, &warn)
+
+	if len(atLeastOnceKeys) != 0 {
+		for n := 0; n < len(atLeastOnceKeys); n++ {
+			c.ackQ <- nil
+		}
+		c.atLeastOnceBlock <- holdup{
+			Since: atLeastOnceKeys[0],
+			Until: atLeastOnceKeys[len(atLeastOnceKeys)-1],
+		}
+	} else {
+		c.atLeastOnceSem <- 0
+	}
+
+	releaseOffset := len(exactlyOnceKeys)
+	for releaseOffset > 0 {
+		_, ok := PUBRELPerKey[exactlyOnceKeys[releaseOffset-1]]
+		if !ok {
+			break
+		}
+		releaseOffset--
+	}
+	for _, key := range exactlyOnceKeys[releaseOffset:] {
+		c.pendingAck = append(c.pendingAck, PUBRELPerKey[key]...)
+		c.compQ <- nil
+	}
+	if releaseOffset > 0 {
+		c.exactlyOnceBlock <- holdup{
+			Since: exactlyOnceKeys[0],
+			Until: exactlyOnceKeys[releaseOffset-1],
+		}
+	} else if len(exactlyOnceKeys) != 0 {
+		c.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
+	} else {
+		c.exactlyOnceSem <- 0
+	}
+
+	c.store = &ruggedStore{Store: store}
+	c.writeBlock <- struct{}{}
+
+	return warn, nil
+}
+
+// SeqNos contains Store sequence numbers.
+type seqNos []uint64
+
+// Len implements sort.Interface.
+func (a seqNos) Len() int { return len(a) }
+
+// Less implements sort.Interface.
+func (a seqNos) Less(i, j int) bool { return a[i] < a[j] }
+
+// Swap implements sort.Interface.
+func (a seqNos) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+
+// CleanSeq returs the last uninterrupted sequence from keys.
+func cleanSeq(keys []uint, name string, store Store, warn *[]error) (cleanKeys []uint) {
+	for len(keys) != 0 {
+		last := keys[0]
+		for i := 1; ; i++ {
+			if i >= len(keys) {
+				return keys
+			}
+			key := keys[i]
+
+			if key&publishIDMask == (last+1)&publishIDMask {
+				last = key
+				continue // correct followup
+			}
+
+			*warn = append(*warn, fmt.Errorf("mqtt: %s %#04x–%#04x lost due gap until %#04x; range may be delete failure leftover or gap may be save failure result", name, keys[0], last, key))
+			for _, key := range keys[:i] {
+				err := store.Delete(key)
+				if err != nil {
+					*warn = append(*warn, fmt.Errorf("mqtt: %d left in store: %w", key, err))
+				}
+			}
+			keys = keys[i:]
+			break
+		}
+	}
 	return nil
 }

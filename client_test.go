@@ -69,16 +69,12 @@ func TestCONNACK(t *testing.T) {
 			})
 
 			var dialN int
-			client := NewClient(&Config{
-				Dialer: func(context.Context) (net.Conn, error) {
-					if dialN != 0 {
-						return nil, errors.New("redial (with test pipe) denied")
-					}
-					dialN++
-					return clientEnd, nil
-				},
-				Store:       NewVolatileStore("test-client"),
-				WireTimeout: time.Second / 2,
+			client := NewClient(&Config{WireTimeout: time.Second / 2}, func(context.Context) (net.Conn, error) {
+				if dialN != 0 {
+					return nil, errors.New("redial (with test pipe) denied")
+				}
+				dialN++
+				return clientEnd, nil
 			})
 
 			done := make(chan error)
@@ -90,7 +86,7 @@ func TestCONNACK(t *testing.T) {
 			}()
 
 			// read CONNECT
-			wantPacketHex(t, brokerEnd, "101700044d51545404000000000b746573742d636c69656e74")
+			wantPacketHex(t, brokerEnd, "100c00044d515454040000000000")
 			// write CONNACK
 			sendPacketHex(t, brokerEnd, gold.send)
 
@@ -116,13 +112,13 @@ func TestCONNACK(t *testing.T) {
 func TestClose(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient(&Config{
-		Dialer: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("dialer invoked")
-		},
-		Store:       NewVolatileStore("test-client"),
-		WireTimeout: time.Second / 2,
+	client := NewClient(&Config{WireTimeout: time.Second / 2}, func(context.Context) (net.Conn, error) {
+		return nil, errors.New("dialer invoked")
 	})
+	err := client.VolatileSession("test-client")
+	if err != nil {
+		t.Fatal("volatile session error:", err)
+	}
 
 	// Invoke Close before ReadSlices (connects).
 	// Race because we can. ™️
@@ -135,7 +131,7 @@ func TestClose(t *testing.T) {
 		}()
 	}
 	time.Sleep(time.Second / 4)
-	_, _, err := client.ReadSlices()
+	_, _, err = client.ReadSlices()
 	if !errors.Is(err, ErrClosed) {
 		t.Fatalf("ReadSlices got error %q, want ErrClosed", err)
 	}

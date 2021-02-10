@@ -47,13 +47,15 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	testTopic := fmt.Sprintf("test/race-%d", deliveryLevel)
 
 	client := mqtt.NewClient(&mqtt.Config{
-		Dialer:         mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")),
 		WireTimeout:    time.Second,
-		Store:          mqtt.NewVolatileStore(t.Name()),
 		CleanSession:   true,
 		AtLeastOnceMax: testN,
 		ExactlyOnceMax: testN,
-	})
+	}, mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")))
+	err := client.VolatileSession(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
@@ -97,7 +99,7 @@ func race(t *testing.T, host string, deliveryLevel int) {
 		}
 	}()
 
-	err := client.Subscribe(nil, testTopic)
+	err = client.Subscribe(nil, testTopic)
 	if err != nil {
 		t.Fatal("subscribe error: ", err)
 	}

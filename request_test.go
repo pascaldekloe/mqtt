@@ -46,17 +46,15 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 
 	var dialN int
 	client := NewClient(&Config{
-		Dialer: func(context.Context) (net.Conn, error) {
-			if dialN != 0 {
-				return nil, errors.New("redial (with test pipe) denied")
-			}
-			dialN++
-			return clientEnd, nil
-		},
-		Store:          NewVolatileStore("test-client"),
 		WireTimeout:    time.Second / 2,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
+	}, func(context.Context) (net.Conn, error) {
+		if dialN != 0 {
+			return nil, errors.New("redial (with test pipe) denied")
+		}
+		dialN++
+		return clientEnd, nil
 	})
 
 	done := make(chan struct{})
@@ -102,7 +100,7 @@ func newClientPipe(t *testing.T, want ...reception) (*Client, net.Conn) {
 	}()
 
 	// read CONNECT
-	wantPacketHex(t, brokerEnd, "101700044d51545404000000000b746573742d636c69656e74")
+	wantPacketHex(t, brokerEnd, "100c00044d515454040000000000")
 	// write CONNACK
 	sendPacketHex(t, brokerEnd, "20020000")
 

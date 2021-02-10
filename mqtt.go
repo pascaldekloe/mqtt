@@ -5,10 +5,13 @@
 package mqtt
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // Control packets have a 4-bit type code in the first byte.
@@ -173,9 +176,6 @@ func IsConnectionRefused(err error) bool {
 
 // Store keys correspond to MQTT packet identifiers.
 const (
-	// Packet identifier zero is not in use by the protocol.
-	clientIDKey = 0
-
 	// Packet identifiers on inbound and outbound requests each have their
 	// own namespace. The most-significant bit on a Store key makes the
 	// distinction.
@@ -186,7 +186,10 @@ const (
 // Client at a time.
 //
 // Content is addressed by a 17-bit key, mask 0x1ffff.
-// The maximum size for entries is 256 MiB + 5 B.
+// The minimum size for entries is 12 B.
+// The maximum size for entries is 256 MiB + 17 B.
+// Clients apply integrity checks on content.
+//
 // Methods on a Store may be invoked simultaneously.
 type Store interface {
 	// Load resolves content under a key. A nil return means “not found”.
@@ -195,7 +198,7 @@ type Store interface {
 	// Save upserts content under a key. The method is expected to operate
 	// in an atomic manner. That is, an error should imply that the content
 	// remains unmodified.
-	Save(key uint, data net.Buffers) error
+	Save(key uint, content net.Buffers) error
 
 	// Removes all content under a key in an atomic manner. Deletes of a non
 	// existent content are not considdered to be an error.
@@ -205,48 +208,14 @@ type Store interface {
 	List() (keys []uint, err error)
 }
 
-// InitSession configures the Store for first use. Brokers use clientID to
-// uniquely identify the session. A session may be continued by using the same
-// Store (content) again with another Client.
-func InitSession(store Store, clientID string) error {
-	// fail-fast
-	if err := stringCheck(clientID); err != nil {
-		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
-	}
-
-	// empty check
-	keys, err := store.List()
-	if err != nil {
-		return err
-	}
-	if len(keys) != 0 {
-		return errors.New("mqtt: store already initialized")
-	}
-
-	// install
-	return store.Save(clientIDKey, net.Buffers{[]byte(clientID)})
-}
-
 // Volatile is an in-memory Store.
 type volatile struct {
 	sync.Mutex
 	perKey map[uint][]byte
 }
 
-// NewVolatileStore returns a new in-memory session, ready for use. InitSession
-// is already applied to the Store. This setup is recommended for delivery with
-// the “at most once” guarantee [Publish], and/or for reception without the
-// “exactly once” guarantee [SubscribeLimitAtLeastOnce], and for testing.
-//
-// Brokers use clientID to uniquely identify the session. Volatile sessions may
-// be continued by using the same clientID again. Use CleanSession to prevent
-// reuse of an existing state.
-func NewVolatileStore(clientID string) Store {
-	return &Config{
-		Store: &volatile{perKey: map[uint][]byte{
-			clientIDKey: []byte(clientID),
-		}},
-	}
+func newVolatileStore() Store {
+	return &volatile{perKey: make(map[uint][]byte)}
 }
 
 // Load implements the Store interface.
@@ -257,14 +226,14 @@ func (m *volatile) Load(key uint) ([]byte, error) {
 }
 
 // Save implements the Store interface.
-func (m *volatile) Save(key uint, data net.Buffers) error {
+func (m *volatile) Save(key uint, content net.Buffers) error {
 	var n int
-	for _, b := range data {
+	for _, b := range content {
 		n += len(b)
 	}
 	buf := make([]byte, n)
 	i := 0
-	for _, b := range data {
+	for _, b := range content {
 		i += copy(buf[i:], b)
 	}
 
@@ -291,4 +260,56 @@ func (m *volatile) List() (keys []uint, err error) {
 		keys = append(keys, k)
 	}
 	return keys, nil
+}
+
+// ruggedStore applies a sequence number plus content integrity checks.
+type ruggedStore struct {
+	Store
+	// Store content is ordered based on this sequence number.
+	// Zero is reserved for the clientIDKey content.
+	seqNo uint64
+}
+
+func (r *ruggedStore) Load(key uint) ([]byte, error) {
+	value, err := r.Store.Load(key)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, nil
+	}
+	value, _, ok := decodeStoreContent(value)
+	if !ok {
+		return nil, fmt.Errorf("mqtt: persistence content from key %#x corrupt", key)
+	}
+	return value, nil
+}
+
+func (rugged *ruggedStore) Save(key uint, content net.Buffers) error {
+	content = encodeStoreContent(content, atomic.AddUint64(&rugged.seqNo, 1))
+	return rugged.Store.Save(key, content)
+}
+
+var checkTable = crc32.MakeTable(crc32.Castagnoli)
+
+func encodeStoreContent(packet net.Buffers, seqNo uint64) net.Buffers {
+	var sum uint32
+	for _, buf := range packet {
+		sum = crc32.Update(sum, checkTable, buf)
+	}
+	var buf [12]byte
+	binary.LittleEndian.PutUint64(buf[:8], seqNo)
+	sum = crc32.Update(sum, checkTable, buf[:8])
+	binary.LittleEndian.PutUint32(buf[8:], sum)
+	return append(packet, buf[:])
+}
+
+func decodeStoreContent(buf []byte) (packet []byte, seqNo uint64, ok bool) {
+	if len(buf) < 12 {
+		return nil, 0, false
+	}
+	if crc32.Checksum(buf[:len(buf)-4], checkTable) != binary.LittleEndian.Uint32(buf[len(buf)-4:]) {
+		return nil, 0, false
+	}
+	return buf[:len(buf)-12], binary.LittleEndian.Uint64(buf[len(buf)-12:]), true
 }

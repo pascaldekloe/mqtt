@@ -76,12 +76,8 @@ func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 	}
 }
 
-// Config is a Client configuration. Dialer and Store are the only required
-// fields, although the WireTimeout comes highly recommended.
+// Config is a Client configuration.
 type Config struct {
-	Dialer // chooses the broker
-	Store  // persists the session
-
 	// WireTimeout sets the minimim transfer rate as one byte per duration.
 	// Zero disables timeout protection, which leaves the Client vulnerable
 	// to blocking on stale connections.
@@ -125,8 +121,13 @@ type Config struct {
 }
 
 // NewCONNREQ returns a new packet.
-func (c *Config) newCONNREQ() ([]byte, error) {
-	clientID, err := c.Load(clientIDKey)
+func (c *Client) newCONNREQ() ([]byte, error) {
+	err := c.VolatileSession("")
+	if err != nil && err != errInitTwo {
+		return nil, err
+	}
+
+	clientID, err := c.store.Load(clientIDKey)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +221,9 @@ func (c *Config) newCONNREQ() ([]byte, error) {
 type Client struct {
 	Config // read-only
 
+	dialer Dialer // chooses the broker
+	store  Store  // persists the session
+
 	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
 	r        *bufio.Reader // conn buffered
@@ -261,21 +265,23 @@ type Client struct {
 	orderedTxs
 	unorderedTxs
 
-	// The read routine uses this reusable buffer for packet submission.
-	pendingAck [4]byte
+	// The read routine sends its content as soon as possible.
+	pendingAck []byte
+	// The read routine applies this reusable buffer to pendingAck.
+	readBuf [4]byte
+
 	// The read routine parks reception beyond readBufSize.
 	bigMessage *BigMessage
 }
 
 // NewClient returns a new Client. Configuration errors result in IsDeny on
-// ReadSlices.
-func NewClient(config *Config) *Client {
-	if config.Dialer == nil {
+// ReadSlices. The Client may be initialized next, with either an InitSession,
+// AdoptSession or VolatileSession.
+func NewClient(config *Config, dialer Dialer) *Client {
+	if dialer == nil {
 		panic("nil Dialer")
 	}
-	if config.Store == nil {
-		panic("nil Store")
-	}
+
 	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
 		config.AtLeastOnceMax = publishIDMask
@@ -286,6 +292,7 @@ func NewClient(config *Config) *Client {
 
 	c := &Client{
 		Config:         *config, // copy
+		dialer:         dialer,
 		connSem:        make(chan net.Conn, 1),
 		writeSem:       make(chan net.Conn, 1),
 		writeBlock:     make(chan struct{}, 1),
@@ -301,9 +308,6 @@ func NewClient(config *Config) *Client {
 	}
 	c.connSem <- nil
 	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
-	c.writeBlock <- struct{}{}
-	c.atLeastOnceSem <- 0
-	c.exactlyOnceSem <- 0
 	return c
 }
 
@@ -398,7 +402,13 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		<-c.atLeastOnceSem      // lock
+		if c.store == nil {
+			return // not initialized
+		}
+		select {
+		case <-c.atLeastOnceSem:
+		case <-c.atLeastOnceBlock:
+		}
 		close(c.atLeastOnceSem) // terminate
 		// flush queue
 		close(c.ackQ)
@@ -413,7 +423,13 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		<-c.exactlyOnceSem      // lock
+		if c.store == nil {
+			return // not initialized
+		}
+		select {
+		case <-c.exactlyOnceSem:
+		case <-c.exactlyOnceBlock:
+		}
 		close(c.exactlyOnceSem) // terminate
 		// flush queues
 		close(c.recQ)
@@ -676,7 +692,7 @@ func (c *Client) connect() error {
 	if oldConn != nil && c.CleanSession {
 		c.CleanSession = false
 	}
-	conn, err := c.Dialer(c.dialCtx)
+	conn, err := c.dialer(c.dialCtx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
@@ -784,23 +800,23 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	}
 
 	// acknowledge previous packet, if any
-	if c.pendingAck[0] != 0 {
-		if c.pendingAck[0]&0xf0 == typePUBREC<<4 {
+	if len(c.pendingAck) != 0 {
+		if c.pendingAck[0]>>4 == typePUBREC {
 			// BUG(pascaldekloe): Save errors from a Store may cause
 			// duplicate reception for deliveries with the "exactly
 			// once guarantee", if the respective Client goes down
 			// before a recovery/retry succeeds.
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
-			err = c.Store.Save(key, net.Buffers{c.pendingAck[:]})
+			err = c.store.Save(key, net.Buffers{c.pendingAck})
 			if err != nil {
 				return nil, nil, err
 			}
 		}
-		err := c.write(nil, c.pendingAck[:])
+		err := c.write(nil, c.pendingAck)
 		if err != nil {
 			return nil, nil, err
 		}
-		c.pendingAck[0], c.pendingAck[1], c.pendingAck[2], c.pendingAck[3] = 0, 0, 0, 0
+		c.pendingAck = nil
 	}
 
 	// process packets until a PUBLISH appears
@@ -968,8 +984,9 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		i += 2
 
 		// enqueue for next call
-		c.pendingAck[0], c.pendingAck[1] = typePUBACK<<4, 2
-		c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
+		c.readBuf[0], c.readBuf[1] = typePUBACK<<4, 2
+		c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
+		c.pendingAck = c.readBuf[:4]
 
 	case exactlyOnceLevel << 1:
 		if len(c.peek) < i+2 {
@@ -981,7 +998,7 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 		i += 2
 
-		bytes, err := c.Store.Load(packetID | remoteIDKeyFlag)
+		bytes, err := c.store.Load(packetID | remoteIDKeyFlag)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -990,8 +1007,9 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 
 		// enqueue for next call
-		c.pendingAck[0], c.pendingAck[1] = typePUBREC<<4, 2
-		c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
+		c.readBuf[0], c.readBuf[1] = typePUBREC<<4, 2
+		c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
+		c.pendingAck = c.readBuf[:4]
 
 	default:
 		return nil, nil, fmt.Errorf("%w: PUBLISH with reserved quality-of-service level 3", errProtoReset)
@@ -1010,17 +1028,18 @@ func (c *Client) onPUBREL() error {
 		return errPacketIDZero
 	}
 
-	c.pendingAck[0], c.pendingAck[1] = typePUBCOMP<<4, 2
-	c.pendingAck[2], c.pendingAck[3] = byte(packetID>>8), byte(packetID)
-	err := c.Store.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck[:4]})
+	c.readBuf[0], c.readBuf[1] = typePUBCOMP<<4, 2
+	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
+	c.pendingAck = c.readBuf[:4]
+	err := c.store.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
 	if err != nil {
-		c.pendingAck[0], c.pendingAck[1], c.pendingAck[2], c.pendingAck[3] = 0, 0, 0, 0
+		c.pendingAck = nil
 		return err // causes resubmission of PUBREL
 	}
-	err = c.write(nil, c.pendingAck[:4])
+	err = c.write(nil, c.pendingAck)
 	if err != nil {
 		return err // causes resubmission of PUBCOMP
 	}
-	c.pendingAck[0], c.pendingAck[1], c.pendingAck[2], c.pendingAck[3] = 0, 0, 0, 0
+	c.pendingAck = nil
 	return nil
 }

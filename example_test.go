@@ -27,12 +27,13 @@ func init() {
 	// The log lines serve as example explanation only.
 	log.SetOutput(ioutil.Discard)
 
-	c := mqtt.NewClient(&mqtt.Config{
-		Dialer: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("won't dial for demo client")
-		},
-		Store: mqtt.NewVolatileStore("demo-client"),
+	c := mqtt.NewClient(new(mqtt.Config), func(context.Context) (net.Conn, error) {
+		return nil, errors.New("won't dial for demo client")
 	})
+	err := c.VolatileSession("demo-client")
+	if err != nil {
+		panic(err)
+	}
 	c.Close()
 
 	PublishAtLeastOnce = c.PublishAtLeastOnce
@@ -41,11 +42,10 @@ func init() {
 
 // It is good practice to install the client from main.
 func ExampleNewClient_setup() {
-	client := mqtt.NewClient(&mqtt.Config{
-		Dialer:      mqtt.NewDialer("tcp", "localhost:1883"),
-		Store:       mqtt.NewVolatileStore("demo-client"),
-		WireTimeout: time.Second,
-	})
+	client := mqtt.NewClient(&mqtt.Config{WireTimeout: time.Second}, mqtt.NewDialer("tcp", "localhost:1883"))
+	if err := client.VolatileSession("demo-client"); err != nil {
+		log.Fatal(err)
+	}
 
 	// launch read-routine
 	go func() {

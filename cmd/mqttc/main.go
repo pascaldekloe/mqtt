@@ -60,7 +60,7 @@ var (
 	verboseFlag = flag.Bool("verbose", false, "Produces more output to "+italic+"standard error"+clear+" for debug purposes.")
 )
 
-func parseConfig() *mqtt.Config {
+func parseConfig() (clientID string, config *mqtt.Config, dialer mqtt.Dialer) {
 	var addr string
 	switch args := flag.Args(); {
 	case len(args) == 0:
@@ -82,21 +82,14 @@ func parseConfig() *mqtt.Config {
 		addr = net.JoinHostPort(addr, port)
 	}
 
-	clientID := *clientFlag
+	clientID = *clientFlag
 	if clientID == generatedLabel {
 		clientID = "mqttc(1)-" + time.Now().In(time.UTC).Format(time.RFC3339Nano)
 	}
-	config := &mqtt.Config{
-		Store:       mqtt.NewVolatileStore(clientID),
+
+	config = &mqtt.Config{
 		WireTimeout: *timeoutFlag,
 		UserName:    *userFlag,
-	}
-	if *tlsFlag {
-		config.Dialer = mqtt.NewTLSDialer(*netFlag, addr, &tls.Config{
-			ServerName: *serverFlag,
-		})
-	} else {
-		config.Dialer = mqtt.NewDialer(*netFlag, addr)
 	}
 	if *passFlag != "" {
 		bytes, err := os.ReadFile(*passFlag)
@@ -105,7 +98,15 @@ func parseConfig() *mqtt.Config {
 		}
 		config.Password = bytes
 	}
-	return config
+
+	if *tlsFlag {
+		dialer = mqtt.NewTLSDialer(*netFlag, addr, &tls.Config{
+			ServerName: *serverFlag,
+		})
+	} else {
+		dialer = mqtt.NewDialer(*netFlag, addr)
+	}
+	return
 }
 
 var exitStatus = make(chan int, 1)
@@ -135,7 +136,12 @@ func main() {
 		log.SetOutput(io.Discard)
 	}
 
-	client = mqtt.NewClient(parseConfig())
+	clientID, config, dialer := parseConfig()
+	client := mqtt.NewClient(config, dialer)
+	err := client.VolatileSession(clientID)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	go applySignals()
 
