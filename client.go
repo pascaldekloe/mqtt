@@ -692,7 +692,9 @@ func (c *Client) connect() error {
 	if oldConn != nil && c.CleanSession {
 		c.CleanSession = false
 	}
-	conn, err := c.dialer(c.dialCtx)
+	ctx, cancel := context.WithTimeout(c.dialCtx, c.WireTimeout)
+	defer cancel()
+	conn, err := c.dialer(ctx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
