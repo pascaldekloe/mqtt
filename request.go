@@ -806,6 +806,11 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", c.store, &warn)
 	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", c.store, &warn)
 
+	// “When a Client reconnects with CleanSession set to 0, both the Client
+	// and Server MUST re-send any unacknowledged PUBLISH Packets (where QoS
+	// > 0) and PUBREL Packets using their original Packet Identifiers.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-4.4.0-1
+
 	if len(atLeastOnceKeys) != 0 {
 		for n := 0; n < len(atLeastOnceKeys); n++ {
 			c.ackQ <- nil
