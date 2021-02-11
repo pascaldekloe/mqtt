@@ -3,15 +3,14 @@ package mqtt_test
 import (
 	"context"
 	"errors"
-	"io/ioutil"
-	"log"
-	"net"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/pascaldekloe/mqtt"
+	"github.com/pascaldekloe/mqtt/mqtttest"
 )
 
 // Publish is a method from mqtt.Client.
@@ -24,27 +23,16 @@ var PublishAtLeastOnce func(message []byte, topic string) (ack <-chan error, err
 var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
 
 func init() {
-	// The log lines serve as example explanation only.
-	log.SetOutput(ioutil.Discard)
-
-	c := mqtt.NewClient(new(mqtt.Config), func(context.Context) (net.Conn, error) {
-		return nil, errors.New("won't dial for demo client")
-	})
-	err := c.VolatileSession("demo-client")
-	if err != nil {
-		panic(err)
-	}
-	c.Close()
-
-	PublishAtLeastOnce = c.PublishAtLeastOnce
-	Subscribe = c.Subscribe
+	PublishAtLeastOnce = mqtttest.NewPublishAckStub(mqtt.ErrClosed)
+	Subscribe = mqtttest.NewSubscribeStub(mqtt.ErrClosed)
 }
 
 // It is good practice to install the client from main.
 func ExampleNewClient_setup() {
 	client := mqtt.NewClient(&mqtt.Config{WireTimeout: time.Second}, mqtt.NewDialer("tcp", "localhost:1883"))
 	if err := client.VolatileSession("demo-client"); err != nil {
-		log.Fatal(err)
+		fmt.Print("exit on ", err)
+		os.Exit(2)
 	}
 
 	// launch read-routine
@@ -55,24 +43,25 @@ func ExampleNewClient_setup() {
 			switch {
 			case err == nil:
 				// do something with inbound message
-				log.Printf("📥 %q: %q", channel, message)
+				fmt.Printf("📥 %q: %q", channel, message)
 
 			case errors.Is(err, mqtt.ErrClosed):
 				return // terminated
 
 			case mqtt.IsDeny(err):
-				log.Fatal(err) // faulty configuration
+				fmt.Print("unusable configuration: ", err)
+				os.Exit(2)
 
 			case errors.As(err, &big):
-				log.Printf("%d byte content skipped", big.Size)
+				fmt.Printf("%d byte content skipped", big.Size)
 
 			case mqtt.IsConnectionRefused(err):
-				log.Print(err)
+				fmt.Print(err)
 				// ErrDown for a while
 				time.Sleep(5*time.Minute - time.Second)
 
 			default:
-				log.Print("MQTT unavailable: ", err)
+				fmt.Print("MQTT unavailable: ", err)
 				// ErrDown for short backoff
 				time.Sleep(2 * time.Second)
 			}
@@ -90,17 +79,17 @@ func ExampleNewClient_setup() {
 		for sig := range signals {
 			switch sig {
 			case syscall.SIGINT:
-				log.Print("MQTT close on SIGINT…")
+				fmt.Print("MQTT close on SIGINT…")
 				err := client.Close()
 				if err != nil {
-					log.Print(err)
+					fmt.Print(err)
 				}
 
 			case syscall.SIGTERM:
-				log.Print("MQTT disconnect on SIGTERM…")
+				fmt.Print("MQTT disconnect on SIGTERM…")
 				err := client.Disconnect(nil)
 				if err != nil {
-					log.Print(err)
+					fmt.Print(err)
 				}
 			}
 		}
@@ -115,36 +104,37 @@ func ExampleClient_PublishAtLeastOnce_hasty() {
 		ack, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
 		switch {
 		case err == nil:
-			log.Print("alert submitted")
+			fmt.Print("alert submitted")
 
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
-			log.Print("🚨 alert not send: ", err)
+			fmt.Print("🚨 alert not send: ", err)
 			return
 
 		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
-			log.Print("⚠️ alert delay: ", err)
+			fmt.Print("⚠️ alert delay: ", err)
 			time.Sleep(time.Second / 4)
 			continue
 
 		default:
-			log.Print("⚠️ alert delay on persistence malfunction: ", err)
+			fmt.Print("⚠️ alert delay on persistence malfunction: ", err)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		for err := range ack {
 			if errors.Is(err, mqtt.ErrClosed) {
-				log.Print("🚨 alert suspended: ", err)
+				fmt.Print("🚨 alert suspended: ", err)
 				// Submission will continue when the Client
 				// is restarted with the same Store again.
 				return
 			}
-			log.Print("⚠️ alert delay on connection malfunction: ", err)
+			fmt.Print("⚠️ alert delay on connection malfunction: ", err)
 		}
-		log.Print("alert confirmed")
+		fmt.Print("alert confirmed")
 		break
 	}
 	// Output:
+	// 🚨 alert not send: mqtt: client closed
 }
 
 // Error scenario and how to act uppon them.
@@ -157,15 +147,15 @@ func ExampleClient_Subscribe_sticky() {
 		err := Subscribe(ctx.Done(), topicFilter)
 		switch {
 		case err == nil:
-			log.Printf("subscribed to %q", topicFilter)
+			fmt.Printf("subscribed to %q", topicFilter)
 			return
 
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
-			log.Print("no subscribe: ", err)
+			fmt.Print("no subscribe: ", err)
 			return
 
 		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
-			log.Print("subscribe timeout: ", err)
+			fmt.Print("subscribe timeout: ", err)
 			return
 
 		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
@@ -173,9 +163,10 @@ func ExampleClient_Subscribe_sticky() {
 
 		default:
 			backoff := 4 * time.Second
-			log.Printf("subscribe retry in %s on: %s", backoff, err)
+			fmt.Printf("subscribe retry in %s on: %s", backoff, err)
 			time.Sleep(backoff)
 		}
 	}
 	// Output:
+	// no subscribe: mqtt: client closed
 }
