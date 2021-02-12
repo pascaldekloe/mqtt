@@ -56,7 +56,8 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 			}
 		}()
 
-		for {
+		const readSlicesMax = 10
+		for n := 0; n < readSlicesMax; n++ {
 			message, topic, err := client.ReadSlices()
 			if big := (*mqtt.BigMessage)(nil); errors.As(err, &big) {
 				t.Log("ReadSlices got BigMessage")
@@ -79,7 +80,6 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 				case !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error():
 					t.Errorf("ReadSlices got error %q, want errors.Is %q", err, want[0].Err)
 				}
-				// small backoff may prevent error flood
 				time.Sleep(time.Second / 8)
 
 			case len(want) == 0:
@@ -94,6 +94,7 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 				want = want[1:] // move to next in line
 			}
 		}
+		t.Errorf("test abort after %d ReadSlices", readSlicesMax)
 	})
 
 	t.Cleanup(func() {
