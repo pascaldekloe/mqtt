@@ -224,6 +224,11 @@ type Client struct {
 	dialer Dialer // chooses the broker
 	store  Store  // persists the session
 
+	// Presence of a token implies no connection. Only a successfull connect
+	// may clear the signal. Only the read-routine may install the signal.
+	// Clients start offline.
+	offlineSig chan struct{}
+
 	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
 	r        *bufio.Reader // conn buffered
@@ -293,6 +298,7 @@ func NewClient(config *Config, dialer Dialer) *Client {
 	c := &Client{
 		Config:           *config, // copy
 		dialer:           dialer,
+		offlineSig:       make(chan struct{}, 1),
 		connSem:          make(chan net.Conn, 1),
 		writeSem:         make(chan net.Conn, 1),
 		writeBlock:       make(chan struct{}, 1),
@@ -308,6 +314,7 @@ func NewClient(config *Config, dialer Dialer) *Client {
 			perPacketID: make(map[uint16]unorderedCallback),
 		},
 	}
+	c.offlineSig <- struct{}{}
 	c.connSem <- nil
 	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
 	return c
@@ -674,20 +681,40 @@ func (c *Client) peekPacket() (head byte, err error) {
 
 // Connect installs the transport layer. The current
 // connection must be closed in case of a reconnect.
+// The offlineSig must be installed as well. Connect
+// success will clear/remove the offlineSig token.
 func (c *Client) connect() error {
 	packet, err := c.newCONNREQ()
 	if err != nil {
 		return err
 	}
 
-	// The semaphores wont block with a closed connection.
+	c.offlineSig <- <-c.offlineSig // extra verification
+
 	oldConn, ok := <-c.connSem // locks connection control
 	if !ok {
 		return ErrClosed
 	}
+	// No need for further closed channel checks as the
+	// connsem lock is required to close any of them.
+
 	select { // locks write
 	case <-c.writeSem:
 	case <-c.writeBlock:
+	}
+
+	var atLeastOnceSeqNo, exactlyOnceSeqNo uint
+	select { // locks publish submission
+	case atLeastOnceSeqNo = <-c.atLeastOnceSem:
+		break
+	case holdup := <-c.atLeastOnceBlock:
+		atLeastOnceSeqNo = holdup.UntilSeqNo + 1
+	}
+	select { // locks publish submission
+	case exactlyOnceSeqNo = <-c.exactlyOnceSem:
+		break
+	case holdup := <-c.exactlyOnceBlock:
+		exactlyOnceSeqNo = holdup.UntilSeqNo + 1
 	}
 
 	// Reconnects shouldn't reset the session.
@@ -700,6 +727,19 @@ func (c *Client) connect() error {
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
+		n := uint(len(c.ackQ))
+		if n == 0 {
+			c.atLeastOnceSem <- atLeastOnceSeqNo
+		} else {
+			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
+		}
+		n = uint(len(c.recQ) + len(c.compQ))
+		if n == 0 {
+			c.exactlyOnceSem <- exactlyOnceSeqNo
+		} else {
+			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
+		}
+
 		// FIXME(pascaldekloe): Error string matching is supported
 		// according to <https://github.com/golang/go/issues/36208>.
 		if strings.Contains(err.Error(), "operation was canceled") {
@@ -718,14 +758,28 @@ func (c *Client) connect() error {
 	if err != nil {
 		conn.Close()      // abandon
 		c.writeSem <- nil // causes ErrDown
+		n := uint(len(c.ackQ))
+		if n == 0 {
+			c.atLeastOnceSem <- atLeastOnceSeqNo
+		} else {
+			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
+		}
+		n = uint(len(c.recQ) + len(c.compQ))
+		if n == 0 {
+			c.exactlyOnceSem <- exactlyOnceSeqNo
+		} else {
+			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
+		}
 		return err
 	}
 
-	// install
+	<-c.offlineSig // release
+	// install connection
 	c.writeSem <- conn
 	c.readConn = conn
 	c.r = r
 	c.peek = nil // applied to prevous r if any
+
 	return nil
 }
 
@@ -833,6 +887,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			break
 
 		case errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe):
+			c.block()
 			// got interrupted
 			if err := c.connect(); err != nil {
 				c.readConn = nil
@@ -928,6 +983,7 @@ func (c *Client) block() {
 	}
 	c.writeBlock <- struct{}{}
 	c.readConn = nil
+	c.offlineSig <- struct{}{}
 }
 
 // BigMessage signals reception beyond the read buffer capacity.

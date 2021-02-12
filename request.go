@@ -408,8 +408,8 @@ type orderedTxs struct {
 }
 
 type holdup struct {
-	Since uint // packet identifier of oldest entry
-	Until uint // packet identifier of newest entry
+	SinceSeqNo uint // oldest entry
+	UntilSeqNo uint // latest entry
 }
 
 // Publish delivers the message with an “at most once” guarantee.
@@ -522,11 +522,16 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, err
 		}
 		ackQ <- done // won't block due ErrMax check
-		if err := c.writeAll(nil, packet); err != nil {
-			done <- err
-			block <- holdup{counter, counter}
-		} else {
+
+		switch err := c.writeAll(c.offlineSig, packet); {
+		case err == nil:
 			sem <- counter + 1
+		case errors.Is(err, ErrCanceled):
+			c.offlineSig <- struct{}{} // restore signal
+			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
+		default:
+			done <- err
+			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		}
 
 	case holdup := <-block:
@@ -534,14 +539,14 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			block <- holdup // unlock
 			return nil, ErrMax
 		}
-		packetID := applyPublishSeqNo(packet, holdup.Until+1)
+		packetID := applyPublishSeqNo(packet, holdup.UntilSeqNo+1)
 		err = c.store.Save(packetID, packet)
 		if err != nil {
 			block <- holdup // unlock
 			return nil, err
 		}
 		ackQ <- done // won't block due ErrMax check
-		holdup.Until++
+		holdup.UntilSeqNo++
 		c.atLeastOnceBlock <- holdup
 	}
 
@@ -816,8 +821,8 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 			c.ackQ <- nil
 		}
 		c.atLeastOnceBlock <- holdup{
-			Since: atLeastOnceKeys[0],
-			Until: atLeastOnceKeys[len(atLeastOnceKeys)-1],
+			SinceSeqNo: atLeastOnceKeys[0],
+			UntilSeqNo: atLeastOnceKeys[len(atLeastOnceKeys)-1],
 		}
 	} else {
 		c.atLeastOnceSem <- 0
@@ -837,8 +842,8 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 	}
 	if releaseOffset > 0 {
 		c.exactlyOnceBlock <- holdup{
-			Since: exactlyOnceKeys[0],
-			Until: exactlyOnceKeys[releaseOffset-1],
+			SinceSeqNo: exactlyOnceKeys[0],
+			UntilSeqNo: exactlyOnceKeys[releaseOffset-1],
 		}
 	} else if len(exactlyOnceKeys) != 0 {
 		c.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
