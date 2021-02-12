@@ -266,6 +266,7 @@ func testRoutine(t *testing.T, f func()) {
 	t.Helper()
 	done := make(chan struct{})
 	t.Cleanup(func() {
+		t.Helper()
 		select {
 		case <-done:
 			break // OK
