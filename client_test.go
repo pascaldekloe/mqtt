@@ -21,6 +21,9 @@ const newClientCONNECTHex = "100c00044d515454040000000000"
 // NewClient returns a new client with a Dialer which returns conns in order of
 // appearence.
 func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.Client {
+	// This type of test is slow in general.
+	t.Parallel()
+
 	timeoutDone := make(chan struct{})
 	timeout := time.AfterFunc(time.Second, func() {
 		defer close(timeoutDone)
@@ -119,7 +122,8 @@ func TestCONNACK(t *testing.T) {
 
 	for _, gold := range golden {
 		t.Run("0x"+gold.send, func(t *testing.T) {
-			t.Parallel()
+			// local copy before t.Parallel
+			gold := gold
 
 			clientEnd, brokerEnd := net.Pipe()
 			blocked, _ := net.Pipe()
@@ -144,8 +148,6 @@ func TestCONNACK(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	t.Parallel()
-
 	client := mqtt.NewClient(&mqtt.Config{WireTimeout: time.Second / 2}, func(context.Context) (net.Conn, error) {
 		return nil, errors.New("dialer invoked")
 	})
