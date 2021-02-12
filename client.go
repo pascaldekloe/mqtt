@@ -780,6 +780,51 @@ func (c *Client) connect() error {
 	c.r = r
 	c.peek = nil // applied to prevous r if any
 
+	// Resend any pending PUBLISH and/or PUBREL entries from the Store.
+	// The queues are locked because this runs within the read-routine and new
+	// submission requires either the sequence number semaphore or a holdup block.
+	if n := uint(len(c.ackQ)); n != 0 {
+		err := c.resendPublishPackets(atLeastOnceSeqNo-n, atLeastOnceSeqNo-1, atLeastOnceIDSpace)
+		if err != nil {
+			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
+			n = uint(len(c.recQ) + len(c.compQ))
+			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
+			return err
+		}
+	}
+	c.atLeastOnceSem <- atLeastOnceSeqNo
+	if n := uint(len(c.recQ) + len(c.compQ)); n != 0 {
+		err := c.resendPublishPackets(exactlyOnceSeqNo-n, exactlyOnceSeqNo-1, exactlyOnceIDSpace)
+		if err != nil {
+			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
+			return err
+		}
+	}
+	c.exactlyOnceSem <- exactlyOnceSeqNo
+
+	return nil
+}
+
+func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) error {
+	for seqNo := firstSeqNo; seqNo <= lastSeqNo; seqNo++ {
+		key := seqNo&publishIDMask | space
+		packet, err := c.store.Load(key)
+		if err != nil {
+			c.block()
+			return err
+		}
+		if len(packet) == 0 {
+			return fmt.Errorf("mqtt: persistence key %#04x gone missing 👻", key)
+		}
+		if packet[0]>>4 == typePUBLISH {
+			packet[0] |= dupeFlag
+		}
+		err = c.write(nil, packet)
+		if err != nil {
+			c.block()
+			return err
+		}
+	}
 	return nil
 }
 

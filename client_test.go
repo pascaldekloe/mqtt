@@ -47,12 +47,10 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 		return conns[dialN-1], nil
 	})
 
-	// launch read-routine
-	testRoutine(t, func() {
+	readRoutineDone := testRoutine(t, func() {
 		defer func() {
-			if !timeout.Stop() {
-				// await all routines
-				<-timeoutDone
+			if timeout.Stop() {
+				close(timeoutDone)
 			}
 		}()
 
@@ -80,7 +78,7 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 				case !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error():
 					t.Errorf("ReadSlices got error %q, want errors.Is %q", err, want[0].Err)
 				}
-				time.Sleep(time.Second / 8)
+				time.Sleep(time.Second / 16)
 
 			case len(want) == 0:
 				t.Errorf("ReadSlices got message %q @ %q, want close", message, topic)
@@ -102,8 +100,8 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 		if err != nil {
 			t.Error("client close error:", err)
 		}
-		// give read-routine little time exit on ErrClosed
-		time.Sleep(time.Second/16)
+		<-readRoutineDone
+		<-timeoutDone
 	})
 
 	return client
@@ -262,22 +260,23 @@ func TestReceivePublishAtLeastOnceBig(t *testing.T) {
 	wantPacketHex(t, conn, "4002abcd") // PUBACK
 }
 
-func testRoutine(t *testing.T, f func()) {
+func testRoutine(t *testing.T, f func()) (done <-chan struct{}) {
 	t.Helper()
-	done := make(chan struct{})
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		f()
+	}()
 	t.Cleanup(func() {
 		t.Helper()
 		select {
-		case <-done:
+		case <-ch:
 			break // OK
-		case <-time.After(time.Second / 8):
+		default:
 			t.Error("test routine leak")
 		}
 	})
-	go func() {
-		defer close(done)
-		f()
-	}()
+	return ch
 }
 
 func sendPacketHex(t *testing.T, conn net.Conn, send string) {

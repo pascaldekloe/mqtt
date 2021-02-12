@@ -24,9 +24,23 @@ func newClientPipe(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.C
 	return client, brokerEnd
 }
 
+func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Client, []net.Conn) {
+	clientConns := make([]net.Conn, n)
+	brokerConns := make([]net.Conn, n)
+	for i := range clientConns {
+		clientConns[i], brokerConns[i] = net.Pipe()
+	}
+	client := newClient(t, clientConns, want...)
+
+	wantPacketHex(t, brokerConns[0], newClientCONNECTHex)
+	sendPacketHex(t, brokerConns[0], "20020000") // CONNACK
+
+	return client, brokerConns
+}
+
 func TestPing(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, "c000") // PINGREQ
 		sendPacketHex(t, conn, "d000") // PINGRESP
 	})
@@ -35,11 +49,12 @@ func TestPing(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestPingReqTimeout(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
@@ -55,11 +70,12 @@ func TestPingReqTimeout(t *testing.T) {
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestPingRespNone(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, "c000") // PINGREQ
 		// leave without response
 	})
@@ -70,11 +86,12 @@ func TestPingRespNone(t *testing.T) {
 	if !errors.Is(err, mqtt.ErrAbandoned) {
 		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestSubscribeMultiple(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x82, 19,
 			0x60, 0x00, // packet identifier
@@ -90,11 +107,12 @@ func TestSubscribeMultiple(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestSubscribeReqTimeout(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
@@ -110,11 +128,12 @@ func TestSubscribeReqTimeout(t *testing.T) {
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestSubscribeRespNone(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, "8206600000017802")
 		// leave without response
 	})
@@ -125,11 +144,12 @@ func TestSubscribeRespNone(t *testing.T) {
 	if !errors.Is(err, mqtt.ErrAbandoned) {
 		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestPublish(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x30, 12,
 			0, 5, 'g', 'r', 'e', 'e', 't',
@@ -140,6 +160,7 @@ func TestPublish(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
+	<-brokerMockDone
 }
 
 func TestPublishReqTimeout(t *testing.T) {
@@ -164,7 +185,7 @@ func TestPublishReqTimeout(t *testing.T) {
 
 func TestPublishAtLeastOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x32, 14,
 			0, 5, 'g', 'r', 'e', 'e', 't',
@@ -178,11 +199,12 @@ func TestPublishAtLeastOnce(t *testing.T) {
 		t.Errorf("got error %q [%T]", err, err)
 	}
 	testAck(t, ack)
+	<-brokerMockDone
 }
 
 func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
@@ -209,11 +231,44 @@ func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
 		}
 	}
+	<-brokerMockDone
+}
+
+// A Client must resend each PUBLISH which is pending PUBACK when the connection
+// is reset (for whater reasons).
+func TestPublishAtLeastOnceResend(t *testing.T) {
+	client, conns := newClientPipeN(t, 2, mqtttest.Transfer{Err: io.EOF})
+	brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, conns[0], hex.EncodeToString([]byte{
+			0x32, 6,
+			0, 1, 'y',
+			0x80, 0x00, // packet identifier
+			'x'}))
+		if err := conns[0].Close(); err != nil {
+			t.Fatal("broker got error on first connection close:", err)
+		}
+
+		wantPacketHex(t, conns[1], newClientCONNECTHex)
+		sendPacketHex(t, conns[1], "20020000") // CONNACK
+		wantPacketHex(t, conns[1], hex.EncodeToString([]byte{
+			0x3a, 6, // with duplicate [DUP] flag
+			0, 1, 'y',
+			0x80, 0x00, // packet identifier
+			'x'}))
+		sendPacketHex(t, conns[1], "40028000") // SUBACK after all
+	})
+
+	ack, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
+	if err != nil {
+		t.Errorf("got error %q [%T]", err, err)
+	}
+	testAck(t, ack)
+	<-brokerMockDone
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x34, 14,
 			0, 5, 'g', 'r', 'e', 'e', 't',
@@ -229,11 +284,12 @@ func TestPublishExactlyOnce(t *testing.T) {
 		t.Errorf("got error %q [%T]", err, err)
 	}
 	testAck(t, ack)
+	<-brokerMockDone
 }
 
 func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 	client, conn := newClientPipe(t)
-	testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
@@ -260,6 +316,7 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
 		}
 	}
+	<-brokerMockDone
 }
 
 func testAck(t *testing.T, ack <-chan error) {
