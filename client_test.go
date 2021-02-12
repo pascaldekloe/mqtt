@@ -102,6 +102,8 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 		if err != nil {
 			t.Error("client close error:", err)
 		}
+		// give read-routine little time exit on ErrClosed
+		time.Sleep(time.Second/16)
 	})
 
 	return client
