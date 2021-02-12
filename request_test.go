@@ -1,8 +1,10 @@
 package mqtt_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -24,7 +26,6 @@ func newClientPipe(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.C
 
 func TestPing(t *testing.T) {
 	client, conn := newClientPipe(t)
-
 	testRoutine(t, func() {
 		wantPacketHex(t, conn, "c000") // PINGREQ
 		sendPacketHex(t, conn, "d000") // PINGRESP
@@ -32,13 +33,47 @@ func TestPing(t *testing.T) {
 
 	err := client.Ping(nil)
 	if err != nil {
-		t.Error("ping error:", err)
+		t.Errorf("got error %q [%T]", err, err)
 	}
 }
 
-func TestSubscribe(t *testing.T) {
+func TestPingReqTimeout(t *testing.T) {
 	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0xC0:
+			t.Fatalf("want PINGREQ head 0xC0, got %#x", buf[0])
+		}
+		// leave partial read
+	})
 
+	err := client.Ping(nil)
+	var e net.Error
+	if !errors.As(err, &e) || !e.Timeout() {
+		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	}
+}
+
+func TestPingRespNone(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		wantPacketHex(t, conn, "c000") // PINGREQ
+		// leave without response
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
+	defer cancel()
+	err := client.Ping(ctx.Done())
+	if !errors.Is(err, mqtt.ErrAbandoned) {
+		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
+	}
+}
+
+func TestSubscribeMultiple(t *testing.T) {
+	client, conn := newClientPipe(t)
 	testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x82, 19,
@@ -53,13 +88,47 @@ func TestSubscribe(t *testing.T) {
 
 	err := client.Subscribe(nil, "u/noi", "u/shin")
 	if err != nil {
-		t.Fatal("subscribe error:", err)
+		t.Errorf("got error %q [%T]", err, err)
+	}
+}
+
+func TestSubscribeReqTimeout(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0x82:
+			t.Fatalf("want SUBSCRIBE head 0x82, got %#x", buf[0])
+		}
+		// leave partial read
+	})
+
+	err := client.Subscribe(nil, "x")
+	var e net.Error
+	if !errors.As(err, &e) || !e.Timeout() {
+		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	}
+}
+
+func TestSubscribeRespNone(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		wantPacketHex(t, conn, "8206600000017802")
+		// leave without response
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
+	defer cancel()
+	err := client.Subscribe(ctx.Done(), "x")
+	if !errors.Is(err, mqtt.ErrAbandoned) {
+		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
 	}
 }
 
 func TestPublish(t *testing.T) {
 	client, conn := newClientPipe(t)
-
 	testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x30, 12,
@@ -69,13 +138,32 @@ func TestPublish(t *testing.T) {
 
 	err := client.Publish(nil, []byte("hello"), "greet")
 	if err != nil {
-		t.Error("publish error:", err)
+		t.Errorf("got error %q [%T]", err, err)
+	}
+}
+
+func TestPublishReqTimeout(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0x30:
+			t.Fatalf("want PUBLISH head 0x30, got %#x", buf[0])
+		}
+		// leave partial read
+	})
+
+	err := client.Publish(nil, []byte{'x'}, "y")
+	var e net.Error
+	if !errors.As(err, &e) || !e.Timeout() {
+		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
 	}
 }
 
 func TestPublishAtLeastOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
-
 	testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x32, 14,
@@ -87,14 +175,44 @@ func TestPublishAtLeastOnce(t *testing.T) {
 
 	ack, err := client.PublishAtLeastOnce([]byte("hello"), "greet")
 	if err != nil {
-		t.Fatal("publish error:", err)
+		t.Errorf("got error %q [%T]", err, err)
 	}
-	testAckErrors(t, ack)
+	testAck(t, ack)
+}
+
+func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0x32:
+			t.Fatalf("want PUBLISH head 0x32, got %#x", buf[0])
+		}
+		// leave partial read
+	})
+
+	ack, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
+	if err != nil {
+		t.Errorf("got error %q [%T]", err, err)
+	}
+	select {
+	case <-time.After(client.WireTimeout):
+		t.Error("ack timeout")
+	case err, ok := <-ack:
+		var e net.Error
+		switch {
+		case !ok:
+			t.Error("ack closed, want a Timeout net.Error")
+		case !errors.As(err, &e) || !e.Timeout():
+			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
+		}
+	}
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
 	client, conn := newClientPipe(t)
-
 	testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x34, 14,
@@ -108,30 +226,56 @@ func TestPublishExactlyOnce(t *testing.T) {
 
 	ack, err := client.PublishExactlyOnce([]byte("hello"), "greet")
 	if err != nil {
-		t.Fatal("publish error:", err)
+		t.Errorf("got error %q [%T]", err, err)
 	}
-	testAckErrors(t, ack)
+	testAck(t, ack)
 }
 
-func testAckErrors(t *testing.T, ack <-chan error, want ...error) {
+func TestPublishExactlyOnceReqTimeout(t *testing.T) {
+	client, conn := newClientPipe(t)
+	testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0x34:
+			t.Fatalf("want PUBLISH head 0x34, got %#x", buf[0])
+		}
+		// leave partial read
+	})
+
+	ack, err := client.PublishExactlyOnce([]byte{'x'}, "y")
+	if err != nil {
+		t.Errorf("got error %q [%T]", err, err)
+	}
+	select {
+	case <-time.After(client.WireTimeout):
+		t.Error("ack timeout")
+	case err, ok := <-ack:
+		var e net.Error
+		switch {
+		case !ok:
+			t.Error("ack closed, want a Timeout net.Error")
+		case !errors.As(err, &e) || !e.Timeout():
+			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
+		}
+	}
+}
+
+func testAck(t *testing.T, ack <-chan error) {
 	timeout := time.NewTimer(time.Second)
 	defer timeout.Stop()
+
 	for {
 		select {
 		case <-timeout.C:
 			t.Fatal("ack read timeout")
 
 		case err, ok := <-ack:
-			switch {
-			case !ok:
-				return // done
-			case len(want) == 0:
-				t.Errorf("ack error %q, want close", err)
-			case !errors.Is(err, want[0]):
-				t.Errorf("ack error %q, want %q", err, want[0])
-			default:
-				want = want[1:]
+			if !ok {
+				return
 			}
+			t.Errorf("ack got error %q [%T]", err, err)
 		}
 	}
 }
