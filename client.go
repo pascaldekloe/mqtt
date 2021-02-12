@@ -751,13 +751,15 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.2.0-1
 	packet, err := r.Peek(4)
 	switch {
-	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
-		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
 	case c.dialCtx.Err() != nil:
 		return nil, ErrClosed
-	case len(packet) < 4:
+	case len(packet) == 0:
+		return nil, fmt.Errorf("mqtt: no CONNACK: %w", err)
+	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
+		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
+	case err != nil:
 		return nil, fmt.Errorf("mqtt: incomplete CONNACK %#x: %w", packet, err)
-	case packet[3] != byte(accepted):
+	case connectReturn(packet[3]) != accepted:
 		return nil, connectReturn(packet[3])
 	}
 	r.Discard(len(packet)) // no errors guaranteed
