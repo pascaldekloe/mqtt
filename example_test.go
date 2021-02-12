@@ -23,9 +23,17 @@ var PublishAtLeastOnce func(message []byte, topic string) (ack <-chan error, err
 // Subscribe is a method from mqtt.Client.
 var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
 
+// Online is a method from mqtt.Client.
+var Online func() <-chan struct{}
+
 func init() {
 	PublishAtLeastOnce = mqtttest.NewPublishAckStub(nil)
 	Subscribe = mqtttest.NewSubscribeStub(nil)
+	Online = func() <-chan struct{} {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
 }
 
 // It is good practice to install the client from main.
@@ -109,7 +117,11 @@ func ExampleClient_PublishAtLeastOnce_hasty() {
 			fmt.Println("🚨 alert not send:", err)
 			return
 
-		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
+		case errors.Is(err, mqtt.ErrDown):
+			fmt.Println("⚠️ alert delay:", err)
+			<-Online()
+
+		case errors.Is(err, mqtt.ErrMax):
 			fmt.Println("⚠️ alert delay:", err)
 			time.Sleep(time.Second / 4)
 			continue
@@ -158,8 +170,11 @@ func ExampleClient_Subscribe_sticky() {
 			fmt.Print("subscribe timeout: ", err)
 			return
 
-		case errors.Is(err, mqtt.ErrMax), errors.Is(err, mqtt.ErrDown):
-			time.Sleep(time.Second)
+		case errors.Is(err, mqtt.ErrDown):
+			<-Online()
+
+		case errors.Is(err, mqtt.ErrMax):
+			time.Sleep(time.Second / 2)
 
 		default:
 			backoff := 4 * time.Second

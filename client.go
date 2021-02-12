@@ -224,10 +224,9 @@ type Client struct {
 	dialer Dialer // chooses the broker
 	store  Store  // persists the session
 
-	// Presence of a token implies no connection. Only a successfull connect
-	// may clear the signal. Only the read-routine may install the signal.
-	// Clients start offline.
-	offlineSig chan struct{}
+	// Signal channels are closed once their respective state occurs.
+	// Each read must restore or replace the signleton value.
+	onlineSig, offlineSig chan chan struct{}
 
 	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
@@ -298,7 +297,8 @@ func NewClient(config *Config, dialer Dialer) *Client {
 	c := &Client{
 		Config:           *config, // copy
 		dialer:           dialer,
-		offlineSig:       make(chan struct{}, 1),
+		onlineSig:        make(chan chan struct{}, 1),
+		offlineSig:       make(chan chan struct{}, 1),
 		connSem:          make(chan net.Conn, 1),
 		writeSem:         make(chan net.Conn, 1),
 		writeBlock:       make(chan struct{}, 1),
@@ -314,7 +314,13 @@ func NewClient(config *Config, dialer Dialer) *Client {
 			perPacketID: make(map[uint16]unorderedCallback),
 		},
 	}
-	c.offlineSig <- struct{}{}
+
+	// start in offline state
+	c.onlineSig <- make(chan struct{})
+	released := make(chan struct{})
+	close(released)
+	c.offlineSig <- released
+
 	c.connSem <- nil
 	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
 	return c
@@ -472,7 +478,72 @@ func (c *Client) termCallbacks() {
 	wg.Wait()
 }
 
-func (c Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
+// Online returns a chanel that's closed when the client has a connection.
+func (c *Client) Online() <-chan struct{} {
+	ch := <-c.onlineSig
+	c.onlineSig <- ch
+	return ch
+}
+
+// Offline returns a chanel that's closed when the client has no connection.
+func (c *Client) Offline() <-chan struct{} {
+	ch := <-c.offlineSig
+	c.offlineSig <- ch
+	return ch
+}
+
+func (c *Client) onOnline() {
+	on := <-c.onlineSig
+	select {
+	case <-on:
+		break // released already
+	default:
+		close(on)
+	}
+	c.onlineSig <- on
+
+	off := <-c.offlineSig
+	select {
+	case <-off:
+		c.offlineSig <- make(chan struct{})
+	default:
+		c.offlineSig <- off
+	}
+}
+
+func (c *Client) onOffline() {
+	select {
+	case conn := <-c.writeSem:
+		if conn != nil {
+			conn.Close()
+		}
+	case <-c.writeBlock:
+		// A write detected the problem in the mean time.
+		// The signal implies that the connection was closed.
+		break
+	}
+	c.writeBlock <- struct{}{}
+	c.readConn = nil
+
+	off := <-c.offlineSig
+	select {
+	case <-off:
+		break // released already
+	default:
+		close(off)
+	}
+	c.offlineSig <- off
+
+	on := <-c.onlineSig
+	select {
+	case <-on:
+		c.onlineSig <- make(chan struct{})
+	default:
+		c.onlineSig <- on
+	}
+}
+
+func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 	select {
 	case <-quit:
 		return nil, ErrCanceled
@@ -681,15 +752,13 @@ func (c *Client) peekPacket() (head byte, err error) {
 
 // Connect installs the transport layer. The current
 // connection must be closed in case of a reconnect.
-// The offlineSig must be installed as well. Connect
-// success will clear/remove the offlineSig token.
 func (c *Client) connect() error {
 	packet, err := c.newCONNREQ()
 	if err != nil {
 		return err
 	}
 
-	c.offlineSig <- <-c.offlineSig // extra verification
+	<-c.Offline() // extra verification
 
 	oldConn, ok := <-c.connSem // locks connection control
 	if !ok {
@@ -773,7 +842,7 @@ func (c *Client) connect() error {
 		return err
 	}
 
-	<-c.offlineSig // release
+	c.onOnline()
 	// install connection
 	c.writeSem <- conn
 	c.readConn = conn
@@ -810,7 +879,7 @@ func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) er
 		key := seqNo&publishIDMask | space
 		packet, err := c.store.Load(key)
 		if err != nil {
-			c.block()
+			c.onOffline()
 			return err
 		}
 		if len(packet) == 0 {
@@ -821,7 +890,7 @@ func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) er
 		}
 		err = c.write(nil, packet)
 		if err != nil {
-			c.block()
+			c.onOffline()
 			return err
 		}
 	}
@@ -889,7 +958,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	case c.bigMessage != nil:
 		_, err = c.r.Discard(c.bigMessage.Size)
 		if err != nil {
-			c.block()
+			c.onOffline()
 			return nil, nil, err
 		}
 
@@ -932,8 +1001,8 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			break
 
 		case errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe):
-			c.block()
 			// got interrupted
+			c.onOffline()
 			if err := c.connect(); err != nil {
 				c.readConn = nil
 				return nil, nil, err
@@ -949,7 +1018,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 					// If the packet is malformed then
 					// BigMessage is not the issue anymore.
 					c.bigMessage = nil
-					c.block()
+					c.onOffline()
 					return nil, nil, err
 				}
 				c.bigMessage.Topic = string(topic) // copy
@@ -961,7 +1030,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			return nil, nil, c.bigMessage
 
 		default:
-			c.block()
+			c.onOffline()
 			return nil, nil, err
 		}
 
@@ -1006,29 +1075,13 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			err = errRESERVED15
 		}
 		if err != nil {
-			c.block()
+			c.onOffline()
 			return nil, nil, err
 		}
 
 		// no errors guaranteed
 		c.r.Discard(len(c.peek))
 	}
-}
-
-func (c *Client) block() {
-	select {
-	case conn := <-c.writeSem:
-		if conn != nil {
-			conn.Close()
-		}
-	case <-c.writeBlock:
-		// A write detected the problem in the mean time.
-		// The signal implies that the connection was closed.
-		break
-	}
-	c.writeBlock <- struct{}{}
-	c.readConn = nil
-	c.offlineSig <- struct{}{}
 }
 
 // BigMessage signals reception beyond the read buffer capacity.
@@ -1057,7 +1110,7 @@ func (e *BigMessage) ReadAll() ([]byte, error) {
 	message := make([]byte, e.Size)
 	_, err := io.ReadFull(e.Client.r, message)
 	if err != nil {
-		e.Client.block()
+		e.Client.onOffline()
 		return nil, err
 	}
 	return message, nil

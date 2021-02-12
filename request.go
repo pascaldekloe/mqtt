@@ -523,11 +523,10 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 		}
 		ackQ <- done // won't block due ErrMax check
 
-		switch err := c.writeAll(c.offlineSig, packet); {
+		switch err := c.writeAll(c.Offline(), packet); {
 		case err == nil:
 			sem <- counter + 1
 		case errors.Is(err, ErrCanceled):
-			c.offlineSig <- struct{}{} // restore signal
 			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		default:
 			done <- err
