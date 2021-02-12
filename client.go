@@ -291,17 +291,19 @@ func NewClient(config *Config, dialer Dialer) *Client {
 	}
 
 	c := &Client{
-		Config:         *config, // copy
-		dialer:         dialer,
-		connSem:        make(chan net.Conn, 1),
-		writeSem:       make(chan net.Conn, 1),
-		writeBlock:     make(chan struct{}, 1),
-		pingAck:        make(chan chan<- error, 1),
-		atLeastOnceSem: make(chan uint, 1),
-		exactlyOnceSem: make(chan uint, 1),
-		ackQ:           make(chan chan<- error, config.AtLeastOnceMax),
-		recQ:           make(chan chan<- error, config.ExactlyOnceMax),
-		compQ:          make(chan chan<- error, config.ExactlyOnceMax),
+		Config:           *config, // copy
+		dialer:           dialer,
+		connSem:          make(chan net.Conn, 1),
+		writeSem:         make(chan net.Conn, 1),
+		writeBlock:       make(chan struct{}, 1),
+		pingAck:          make(chan chan<- error, 1),
+		atLeastOnceSem:   make(chan uint, 1),
+		exactlyOnceSem:   make(chan uint, 1),
+		atLeastOnceBlock: make(chan holdup, 1),
+		exactlyOnceBlock: make(chan holdup, 1),
+		ackQ:             make(chan chan<- error, config.AtLeastOnceMax),
+		recQ:             make(chan chan<- error, config.ExactlyOnceMax),
+		compQ:            make(chan chan<- error, config.ExactlyOnceMax),
 		unorderedTxs: unorderedTxs{
 			perPacketID: make(map[uint16]unorderedCallback),
 		},
