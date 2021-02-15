@@ -147,6 +147,62 @@ func TestSubscribeRespNone(t *testing.T) {
 	<-brokerMockDone
 }
 
+func TestUnsubscribeMultiple(t *testing.T) {
+	client, conn := newClientPipe(t)
+	brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, conn, hex.EncodeToString([]byte{
+			0xa2, 17,
+			0x40, 0x00, // packet identifier
+			0, 5, 'u', '/', 'n', 'o', 'i',
+			0, 6, 'u', '/', 's', 'h', 'i', 'n',
+		}))
+		sendPacketHex(t, conn, "b0024000") // UNSUBACK
+	})
+
+	err := client.Unsubscribe(nil, "u/noi", "u/shin")
+	if err != nil {
+		t.Errorf("got error %q [%T]", err, err)
+	}
+	<-brokerMockDone
+}
+
+func TestUnsubscribeReqTimeout(t *testing.T) {
+	client, conn := newClientPipe(t)
+	brokerMockDone := testRoutine(t, func() {
+		var buf [1]byte
+		switch _, err := io.ReadFull(conn, buf[:]); {
+		case err != nil:
+			t.Fatal("broker read error:", err)
+		case buf[0] != 0xa2:
+			t.Fatalf("want UNSUBSCRIBE head 0xa2, got %#x", buf[0])
+		}
+		// leave partial read
+	})
+
+	err := client.Unsubscribe(nil, "x")
+	var e net.Error
+	if !errors.As(err, &e) || !e.Timeout() {
+		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	}
+	<-brokerMockDone
+}
+
+func TestUnsubscribeRespNone(t *testing.T) {
+	client, conn := newClientPipe(t)
+	brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, conn, "a2054000000178")
+		// leave without response
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
+	defer cancel()
+	err := client.Unsubscribe(ctx.Done(), "x")
+	if !errors.Is(err, mqtt.ErrAbandoned) {
+		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
+	}
+	<-brokerMockDone
+}
+
 func TestPublish(t *testing.T) {
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {

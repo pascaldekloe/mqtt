@@ -389,7 +389,7 @@ func (c *Client) onUNSUBACK() error {
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
-	case packetID&^unorderedIDMask != subscribeIDSpace:
+	case packetID&^unorderedIDMask != unsubscribeIDSpace:
 		return errPacketIDSpace
 	}
 	done, _ := c.unorderedTxs.endTx(packetID)
