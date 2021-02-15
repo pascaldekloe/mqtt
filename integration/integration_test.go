@@ -15,12 +15,17 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
-func TestRace(t *testing.T) {
-	hosts := strings.Fields(os.Getenv("MQTT_HOSTS"))
-	if len(hosts) == 0 {
-		hosts = append(hosts, "localhost")
-	}
+var hosts = strings.Fields(os.Getenv("MQTT_HOSTS"))
 
+func TestMain(m *testing.M) {
+	if len(hosts) == 0 {
+		fmt.Println("integration tests skipped without MQTT_HOSTS environment variable")
+	} else {
+		os.Exit(m.Run())
+	}
+}
+
+func TestRace(t *testing.T) {
 	for i := range hosts {
 		t.Run(hosts[i], func(t *testing.T) {
 			host := hosts[i]
