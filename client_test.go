@@ -43,7 +43,9 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 		dialN++
 		t.Log("Dial #", dialN)
 		if dialN > len(conns) {
-			return nil, errors.New("no more connections for test")
+			block, _ := net.Pipe()
+			time.Sleep(time.Second / 16)
+			return block, nil
 		}
 		return conns[dialN-1], nil
 	})
@@ -238,10 +240,10 @@ func TestDown(t *testing.T) {
 		return clientEnd, nil
 	})
 
-        brokerMockDone := testRoutine(t, func() {
+	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, brokerEnd, newClientCONNECTHex)
 		sendPacketHex(t, brokerEnd, "20020003")
-        })
+	})
 
 	message, topic, err := client.ReadSlices()
 	if !errors.Is(err, mqtt.ErrUnavailable) {
