@@ -78,7 +78,6 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 				case !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error():
 					t.Errorf("ReadSlices got error %q, want errors.Is %q", err, want[0].Err)
 				}
-				time.Sleep(time.Second / 16)
 
 			case len(want) == 0:
 				t.Errorf("ReadSlices got message %q @ %q, want close", message, topic)
@@ -105,47 +104,6 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 	})
 
 	return client
-}
-
-func TestCONNACK(t *testing.T) {
-	golden := []struct {
-		send string
-		want error
-	}{
-		{send: "20020001", want: mqtt.ErrProtocolLevel},
-		{send: "20020102", want: mqtt.ErrClientID},
-		{send: "20020003", want: mqtt.ErrUnavailable},
-		{send: "20020104", want: mqtt.ErrAuthBad},
-		{send: "20020005", want: mqtt.ErrAuth},
-		// The first packet must be a CONNACK.
-		{send: "d000", want: errors.New("mqtt: connection reset on protocol violation by the broker: want fixed CONNACK header 0x2002, got 0xd000")},
-	}
-
-	for _, gold := range golden {
-		t.Run("0x"+gold.send, func(t *testing.T) {
-			// local copy before t.Parallel
-			gold := gold
-
-			clientEnd, brokerEnd := net.Pipe()
-			blocked, _ := net.Pipe()
-			client := newClient(t, []net.Conn{clientEnd, blocked}, mqtttest.Transfer{Err: gold.want})
-
-			wantPacketHex(t, brokerEnd, newClientCONNECTHex)
-			sendPacketHex(t, brokerEnd, gold.send)
-
-			err := client.Ping(nil)
-			if !errors.Is(err, mqtt.ErrDown) {
-				t.Errorf("ping got error %q, want an ErrDown", err)
-			}
-			err = client.Close()
-			if err != nil {
-				t.Error("close error:", err)
-			}
-
-			// give ReadSlices time to ErrClosed
-			time.Sleep(time.Second / 8)
-		})
-	}
 }
 
 func TestClose(t *testing.T) {
