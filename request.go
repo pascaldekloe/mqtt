@@ -527,6 +527,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 		case err == nil:
 			sem <- counter + 1
 		case errors.Is(err, ErrCanceled):
+			done <- ErrDown
 			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		default:
 			done <- err
@@ -546,7 +547,8 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 		}
 		ackQ <- done // won't block due ErrMax check
 		holdup.UntilSeqNo++
-		c.atLeastOnceBlock <- holdup
+		block <- holdup
+		done <- ErrDown
 	}
 
 	return done, nil

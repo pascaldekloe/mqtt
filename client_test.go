@@ -161,50 +161,50 @@ func TestClose(t *testing.T) {
 	wg.Wait()
 
 	// Run twice to ensure the semaphores ain't leaking.
-	for n := 0; n < 2; n++ {
+	for roundN := 1; roundN <= 2; roundN++ {
 		err = client.Subscribe(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Subscribe %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("Subscribe round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		err = client.Unsubscribe(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Unsubscribe %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("Unsubscribe round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		err = client.Publish(nil, nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Publish %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("Publish round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		err = client.PublishRetained(nil, nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishRetained %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("PublishRetained round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		_, err = client.PublishAtLeastOnce(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishAtLeastOnce %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("PublishAtLeastOnce round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		_, err = client.PublishAtLeastOnceRetained(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishAtLeastOnceRetained %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("PublishAtLeastOnceRetained round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		_, err = client.PublishExactlyOnce(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishExactlyOnce %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("PublishExactlyOnce round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		_, err = client.PublishExactlyOnceRetained(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishExactlyOnceRetained %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("PublishExactlyOnceRetained round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		err = client.Ping(nil)
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Ping %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("Ping round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		err = client.Disconnect(nil)
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Disconnect %d got error %q, want an ErrClosed", n, err)
+			t.Errorf("Disconnect round %d got error %q, want an ErrClosed", roundN, err)
 		}
 		_, _, err = client.ReadSlices()
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Fatalf("ReadSlices got error %q, want an ErrClosed", err)
+			t.Fatalf("ReadSlices round %d got error %q, want an ErrClosed", roundN, err)
 		}
 	}
 
@@ -219,6 +219,101 @@ func TestClose(t *testing.T) {
 		break
 	default:
 		t.Error("offline signal blocked")
+	}
+}
+
+func TestDown(t *testing.T) {
+	brokerEnd, clientEnd := net.Pipe()
+
+	var dialN int
+	client := mqtt.NewClient(&mqtt.Config{
+		WireTimeout:    time.Second / 4,
+		AtLeastOnceMax: 2,
+		ExactlyOnceMax: 2,
+	}, func(context.Context) (net.Conn, error) {
+		dialN++
+		if dialN > 1 {
+			return nil, errors.New("no more connections for test")
+		}
+		return clientEnd, nil
+	})
+
+        brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, brokerEnd, newClientCONNECTHex)
+		sendPacketHex(t, brokerEnd, "20020003")
+        })
+
+	message, topic, err := client.ReadSlices()
+	if !errors.Is(err, mqtt.ErrUnavailable) {
+		t.Fatalf("ReadSlices got (%q, %q, %q), want an ErrUnavailable", message, topic, err)
+	}
+	if !mqtt.IsConnectionRefused(err) {
+		t.Errorf("ReadSlices error %q is not an IsConnectionRefused", err)
+	}
+	<-brokerMockDone
+
+	// Run twice to ensure the semaphores ain't leaking.
+	for roundN := 1; roundN <= 2; roundN++ {
+		err := client.Subscribe(nil, "x")
+		if !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("Subscribe round %d got error %q, want an ErrDown", roundN, err)
+		}
+		err = client.Unsubscribe(nil, "x")
+		if !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("Unsubscribe round %d got error %q, want an ErrDown", roundN, err)
+		}
+		err = client.Publish(nil, nil, "x")
+		if !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("Publish round %d got error %q, want an ErrDown", roundN, err)
+		}
+		err = client.PublishRetained(nil, nil, "x")
+		if !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("PublishRetained round %d got error %q, want an ErrDown", roundN, err)
+		}
+		ack, err := client.PublishAtLeastOnce(nil, "x")
+		if roundN > 1 {
+			if !errors.Is(err, mqtt.ErrMax) {
+				t.Errorf("PublishAtLeastOnce round %d got error %q, want an ErrMax", roundN, err)
+			}
+		} else if err != nil {
+			t.Errorf("PublishAtLeastOnce round %d got error %q", roundN, err)
+		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("PublishAtLeastOnce round %d ack got error %q, want an ErrDown", roundN, err)
+		}
+		ack, err = client.PublishAtLeastOnceRetained(nil, "x")
+		if roundN > 1 {
+			if !errors.Is(err, mqtt.ErrMax) {
+				t.Errorf("PublishAtLeastOnceRetained round %d got error %q, want an ErrMax", roundN, err)
+			}
+		} else if err != nil {
+			t.Errorf("PublishAtLeastOnceRetained round %d got error %q", roundN, err)
+		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("PublishAtLeastOnceRetained round %d ack got error %q, want an ErrDown", roundN, err)
+		}
+		ack, err = client.PublishExactlyOnce(nil, "x")
+		if roundN > 1 {
+			if !errors.Is(err, mqtt.ErrMax) {
+				t.Errorf("PublishExactlyOnce round %d got error %q, want an ErrMax", roundN, err)
+			}
+		} else if err != nil {
+			t.Errorf("PublishExactlyOnce round %d got error %q", roundN, err)
+		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("PublishExactlyOnce round %d ack got error %q, want an ErrDown", roundN, err)
+		}
+		ack, err = client.PublishExactlyOnceRetained(nil, "x")
+		if roundN > 1 {
+			if !errors.Is(err, mqtt.ErrMax) {
+				t.Errorf("PublishExactlyOnceRetained round %d got error %q, want an ErrMax", roundN, err)
+			}
+		} else if err != nil {
+			t.Errorf("PublishExactlyOnceRetained round %d got error %q", roundN, err)
+		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("PublishExactlyOnceRetained round %d ack got error %q, want an ErrDown", roundN, err)
+		}
+		err = client.Ping(nil)
+		if !errors.Is(err, mqtt.ErrDown) {
+			t.Errorf("Ping round %d got error %q, want an ErrDown", roundN, err)
+		}
 	}
 }
 
