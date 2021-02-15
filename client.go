@@ -827,6 +827,10 @@ func (c *Client) connect() error {
 	if err != nil {
 		conn.Close()      // abandon
 		c.writeSem <- nil // causes ErrDown
+		if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+			// connSem entry closed
+			err = ErrClosed
+		}
 		n := uint(len(c.ackQ))
 		if n == 0 {
 			c.atLeastOnceSem <- atLeastOnceSeqNo
