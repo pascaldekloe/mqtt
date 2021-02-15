@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,8 +100,23 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 		if err != nil {
 			t.Error("client close error:", err)
 		}
+
 		<-readRoutineDone
 		<-timeoutDone
+
+		// verify closed state
+		select {
+		case <-client.Online():
+			t.Error("online signal receive after client close")
+		default:
+			break
+		}
+		select {
+		case <-client.Offline():
+			break
+		default:
+			t.Error("offline signal blocked after client close")
+		}
 	})
 
 	return client
@@ -115,69 +131,94 @@ func TestClose(t *testing.T) {
 		t.Fatal("volatile session error:", err)
 	}
 
-	// Invoke Close before ReadSlices (connects).
-	// Race because we can. ™️
+	online := client.Online()
+	select {
+	case <-online:
+		t.Error("online signal receive on intial state")
+	default:
+		break
+	}
+	offline := client.Offline()
+	select {
+	case <-offline:
+		break
+	default:
+		t.Error("offline signal blocked on intial state")
+	}
+
+	// Close before ReadSlices (connects). Race because we can. ™️
+	var wg sync.WaitGroup
 	for n := 0; n < 3; n++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			err := client.Close()
 			if err != nil {
 				t.Error("got close error:", err)
 			}
 		}()
 	}
-	time.Sleep(time.Second / 4)
-	_, _, err = client.ReadSlices()
-	if !errors.Is(err, mqtt.ErrClosed) {
-		t.Fatalf("ReadSlices got error %q, want ErrClosed", err)
-	}
-	// Read (routine) stopped now
+	wg.Wait()
 
 	// Run twice to ensure the semaphores ain't leaking.
 	for n := 0; n < 2; n++ {
 		err = client.Subscribe(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Subscribe %d got error %q, want ErrClosed", n, err)
+			t.Errorf("Subscribe %d got error %q, want an ErrClosed", n, err)
 		}
 		err = client.Unsubscribe(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Unsubscribe %d got error %q, want ErrClosed", n, err)
+			t.Errorf("Unsubscribe %d got error %q, want an ErrClosed", n, err)
 		}
 		err = client.Publish(nil, nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Publish %d got error %q, want ErrClosed", n, err)
+			t.Errorf("Publish %d got error %q, want an ErrClosed", n, err)
 		}
 		err = client.PublishRetained(nil, nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishRetained %d got error %q, want ErrClosed", n, err)
+			t.Errorf("PublishRetained %d got error %q, want an ErrClosed", n, err)
 		}
 		_, err = client.PublishAtLeastOnce(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishAtLeastOnce %d got error %q, want ErrClosed", n, err)
+			t.Errorf("PublishAtLeastOnce %d got error %q, want an ErrClosed", n, err)
 		}
 		_, err = client.PublishAtLeastOnceRetained(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishAtLeastOnceRetained %d got error %q, want ErrClosed", n, err)
+			t.Errorf("PublishAtLeastOnceRetained %d got error %q, want an ErrClosed", n, err)
 		}
 		_, err = client.PublishExactlyOnce(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishExactlyOnce %d got error %q, want ErrClosed", n, err)
+			t.Errorf("PublishExactlyOnce %d got error %q, want an ErrClosed", n, err)
 		}
 		_, err = client.PublishExactlyOnceRetained(nil, "x")
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("PublishExactlyOnceRetained %d got error %q, want ErrClosed", n, err)
+			t.Errorf("PublishExactlyOnceRetained %d got error %q, want an ErrClosed", n, err)
 		}
 		err = client.Ping(nil)
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Ping %d got error %q, want ErrClosed", n, err)
+			t.Errorf("Ping %d got error %q, want an ErrClosed", n, err)
 		}
 		err = client.Disconnect(nil)
 		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("Disconnect %d got error %q, want ErrClosed", n, err)
+			t.Errorf("Disconnect %d got error %q, want an ErrClosed", n, err)
+		}
+		_, _, err = client.ReadSlices()
+		if !errors.Is(err, mqtt.ErrClosed) {
+			t.Fatalf("ReadSlices got error %q, want an ErrClosed", err)
 		}
 	}
-	_, _, err = client.ReadSlices()
-	if !errors.Is(err, mqtt.ErrClosed) {
-		t.Errorf("another ReadSlices got error %q, want ErrClosed", err)
+
+	select {
+	case <-online:
+		t.Error("online signal receive")
+	default:
+		break
+	}
+	select {
+	case <-offline:
+		break
+	default:
+		t.Error("offline signal blocked")
 	}
 }
 

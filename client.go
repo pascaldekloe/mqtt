@@ -492,7 +492,7 @@ func (c *Client) Offline() <-chan struct{} {
 	return ch
 }
 
-func (c *Client) onOnline() {
+func (c *Client) toOnline() {
 	on := <-c.onlineSig
 	select {
 	case <-on:
@@ -511,7 +511,7 @@ func (c *Client) onOnline() {
 	}
 }
 
-func (c *Client) onOffline() {
+func (c *Client) toOffline() {
 	select {
 	case conn := <-c.writeSem:
 		if conn != nil {
@@ -842,7 +842,7 @@ func (c *Client) connect() error {
 		return err
 	}
 
-	c.onOnline()
+	c.toOnline()
 	// install connection
 	c.writeSem <- conn
 	c.readConn = conn
@@ -855,6 +855,7 @@ func (c *Client) connect() error {
 	if n := uint(len(c.ackQ)); n != 0 {
 		err := c.resendPublishPackets(atLeastOnceSeqNo-n, atLeastOnceSeqNo-1, atLeastOnceIDSpace)
 		if err != nil {
+			c.toOffline()
 			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
 			n = uint(len(c.recQ) + len(c.compQ))
 			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
@@ -865,6 +866,7 @@ func (c *Client) connect() error {
 	if n := uint(len(c.recQ) + len(c.compQ)); n != 0 {
 		err := c.resendPublishPackets(exactlyOnceSeqNo-n, exactlyOnceSeqNo-1, exactlyOnceIDSpace)
 		if err != nil {
+			c.toOffline()
 			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
 			return err
 		}
@@ -879,7 +881,6 @@ func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) er
 		key := seqNo&publishIDMask | space
 		packet, err := c.store.Load(key)
 		if err != nil {
-			c.onOffline()
 			return err
 		}
 		if len(packet) == 0 {
@@ -890,7 +891,6 @@ func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) er
 		}
 		err = c.write(nil, packet)
 		if err != nil {
-			c.onOffline()
 			return err
 		}
 	}
@@ -958,7 +958,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	case c.bigMessage != nil:
 		_, err = c.r.Discard(c.bigMessage.Size)
 		if err != nil {
-			c.onOffline()
+			c.toOffline()
 			return nil, nil, err
 		}
 
@@ -1002,7 +1002,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 
 		case errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe):
 			// got interrupted
-			c.onOffline()
+			c.toOffline()
 			if err := c.connect(); err != nil {
 				c.readConn = nil
 				return nil, nil, err
@@ -1018,7 +1018,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 					// If the packet is malformed then
 					// BigMessage is not the issue anymore.
 					c.bigMessage = nil
-					c.onOffline()
+					c.toOffline()
 					return nil, nil, err
 				}
 				c.bigMessage.Topic = string(topic) // copy
@@ -1030,7 +1030,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			return nil, nil, c.bigMessage
 
 		default:
-			c.onOffline()
+			c.toOffline()
 			return nil, nil, err
 		}
 
@@ -1075,7 +1075,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 			err = errRESERVED15
 		}
 		if err != nil {
-			c.onOffline()
+			c.toOffline()
 			return nil, nil, err
 		}
 
@@ -1110,7 +1110,7 @@ func (e *BigMessage) ReadAll() ([]byte, error) {
 	message := make([]byte, e.Size)
 	_, err := io.ReadFull(e.Client.r, message)
 	if err != nil {
-		e.Client.onOffline()
+		e.Client.toOffline()
 		return nil, err
 	}
 	return message, nil
