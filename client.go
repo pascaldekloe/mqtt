@@ -956,6 +956,7 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	// the last return.
 	switch {
 	case c.bigMessage != nil:
+		<-c.Online() // extra verification
 		_, err = c.r.Discard(c.bigMessage.Size)
 		if err != nil {
 			c.toOffline()
@@ -966,8 +967,10 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 		if err := c.connect(); err != nil {
 			return nil, nil, err
 		}
+		<-c.Online() // extra verification
 
 	default:
+		<-c.Online() // extra verification
 		// skip previous packet, if any
 		c.r.Discard(len(c.peek)) // no errors guaranteed
 		c.peek = nil             // flush
