@@ -26,6 +26,29 @@ type Transfer struct {
 	Err     error  // result
 }
 
+// NewReadSlicesMock returns a new mock for mqtt.Client ReadSlices, which
+// returns the Transfers in order of appearance.
+func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []byte, err error) {
+	t.Helper()
+
+	var wantIndex uint64
+
+	return func() (message, topic []byte, err error) {
+		i := atomic.AddUint64(&wantIndex, 1) - 1
+		if i >= uint64(len(want)) {
+			err = errors.New("unwanted MQTT ReadSlices")
+			t.Error(err)
+			return
+		}
+
+		// use copies to prevent some hard to trace issues
+		message = make([]byte, len(want[i].Message))
+		copy(message, want[i].Message)
+		topic = []byte(want[i].Topic)
+		return message, topic, want[i].Err
+	}
+}
+
 // NewPublishMock returns a new mock for mqtt.Client Publish, which compares the
 // invocation with want in order of appearance.
 func NewPublishMock(t testing.TB, want ...Transfer) func(message []byte, topic string) error {
