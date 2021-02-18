@@ -11,19 +11,6 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
-// NewPublishStub returns a new stub for mqtt.Client Publish with a fixed return
-// value.
-func NewPublishStub(returnFix error) func(quit <-chan struct{}, message []byte, topic string) error {
-	return func(quit <-chan struct{}, message []byte, topic string) error {
-		select {
-		case <-quit:
-			return mqtt.ErrCanceled
-		default:
-			return returnFix
-		}
-	}
-}
-
 // Transfer defines a message exchange.
 type Transfer struct {
 	Message []byte // payload
@@ -92,6 +79,19 @@ func NewPublishMock(t testing.TB, want ...Transfer) func(quit <-chan struct{}, m
 			t.Errorf("got MQTT publish of %#x to %q, want %#x to %q", message, topic, transfer.Message, transfer.Topic)
 		}
 		return transfer.Err
+	}
+}
+
+// NewPublishStub returns a new stub for mqtt.Client Publish with a fixed return
+// value.
+func NewPublishStub(returnFix error) func(quit <-chan struct{}, message []byte, topic string) error {
+	return func(quit <-chan struct{}, message []byte, topic string) error {
+		select {
+		case <-quit:
+			return mqtt.ErrCanceled
+		default:
+			return returnFix
+		}
 	}
 }
 
