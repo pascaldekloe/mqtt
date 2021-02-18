@@ -178,7 +178,7 @@ type Filter struct {
 
 // NewSubscribeMock returns a new mock for mqtt.Client Subscribe, which compares
 // the invocation with want in order of appearece.
-func SubscribeMock(t testing.TB, want ...Filter) func(quit <-chan struct{}, topicFilters ...string) error {
+func NewSubscribeMock(t testing.TB, want ...Filter) func(quit <-chan struct{}, topicFilters ...string) error {
 	t.Helper()
 	return newSubscribeMock("subscribe", t, want...)
 }
