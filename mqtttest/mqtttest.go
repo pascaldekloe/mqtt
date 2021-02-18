@@ -13,9 +13,14 @@ import (
 
 // NewPublishStub returns a new stub for mqtt.Client Publish with a fixed return
 // value.
-func NewPublishStub(returnFix error) func(message []byte, topic string) error {
-	return func(message []byte, topic string) error {
-		return returnFix
+func NewPublishStub(returnFix error) func(quit <-chan struct{}, message []byte, topic string) error {
+	return func(quit <-chan struct{}, message []byte, topic string) error {
+		select {
+		case <-quit:
+			return mqtt.ErrCanceled
+		default:
+			return returnFix
+		}
 	}
 }
 
@@ -32,6 +37,12 @@ func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []
 	t.Helper()
 
 	var wantIndex uint64
+
+	t.Cleanup(func() {
+		if n := uint64(len(want)) - atomic.LoadUint64(&wantIndex); n > 0 {
+			t.Errorf("want %d more MQTT ReadSlices", n)
+		}
+	})
 
 	return func() (message, topic []byte, err error) {
 		i := atomic.AddUint64(&wantIndex, 1) - 1
@@ -51,7 +62,7 @@ func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []
 
 // NewPublishMock returns a new mock for mqtt.Client Publish, which compares the
 // invocation with want in order of appearance.
-func NewPublishMock(t testing.TB, want ...Transfer) func(message []byte, topic string) error {
+func NewPublishMock(t testing.TB, want ...Transfer) func(quit <-chan struct{}, message []byte, topic string) error {
 	t.Helper()
 
 	var wantIndex uint64
@@ -62,7 +73,14 @@ func NewPublishMock(t testing.TB, want ...Transfer) func(message []byte, topic s
 		}
 	})
 
-	return func(message []byte, topic string) error {
+	return func(quit <-chan struct{}, message []byte, topic string) error {
+		select {
+		case <-quit:
+			return mqtt.ErrCanceled
+		default:
+			break
+		}
+
 		i := atomic.AddUint64(&wantIndex, 1) - 1
 		if i >= uint64(len(want)) {
 			t.Errorf("unwanted MQTT publish of %#x to %q", message, topic)
