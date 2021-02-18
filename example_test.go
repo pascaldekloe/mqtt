@@ -57,6 +57,7 @@ func ExampleClient_setup() {
 				log.Printf("📥 %q: %q", channel, message)
 
 			case errors.Is(err, mqtt.ErrClosed):
+				log.Print(err)
 				return // terminated
 
 			case errors.As(err, &big):
@@ -65,7 +66,7 @@ func ExampleClient_setup() {
 			case mqtt.IsConnectionRefused(err):
 				log.Print(err)
 				// ErrDown for a while
-				time.Sleep(5*time.Minute - time.Second)
+				time.Sleep(15*time.Minute - time.Second)
 
 			default:
 				log.Print("MQTT unavailable: ", err)
@@ -75,8 +76,8 @@ func ExampleClient_setup() {
 		}
 	}()
 
-	// Install each method in use as a package variable.
-	// Such setup allows for unit tests with stubs.
+	// Install each method in use as a package variable. Such setup is
+	// compatible with the tools proveded from the mqtttest subpackage.
 	Publish = client.Publish
 
 	// apply signals
