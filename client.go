@@ -127,7 +127,7 @@ func (c *Client) newCONNREQ() ([]byte, error) {
 		return nil, err
 	}
 
-	clientID, err := c.store.Load(clientIDKey)
+	clientID, err := c.persistence.Load(clientIDKey)
 	if err != nil {
 		return nil, err
 	}
@@ -221,8 +221,8 @@ func (c *Client) newCONNREQ() ([]byte, error) {
 type Client struct {
 	Config // read-only
 
-	dialer Dialer // chooses the broker
-	store  Store  // persists the session
+	dialer      Dialer      // chooses the broker
+	persistence Persistence // tracks the session
 
 	// Signal channels are closed once their respective state occurs.
 	// Each read must restore or replace the signleton value.
@@ -417,7 +417,7 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if c.store == nil {
+		if c.persistence == nil {
 			return // not initialized
 		}
 		select {
@@ -438,7 +438,7 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if c.store == nil {
+		if c.persistence == nil {
 			return // not initialized
 		}
 		select {
@@ -853,7 +853,7 @@ func (c *Client) connect() error {
 	c.r = r
 	c.peek = nil // applied to prevous r if any
 
-	// Resend any pending PUBLISH and/or PUBREL entries from the Store.
+	// Resend any pending PUBLISH and/or PUBREL entries from Persistence.
 	// The queues are locked because this runs within the read-routine and new
 	// submission requires either the sequence number semaphore or a holdup block.
 	if n := uint(len(c.ackQ)); n != 0 {
@@ -883,7 +883,7 @@ func (c *Client) connect() error {
 func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) error {
 	for seqNo := firstSeqNo; seqNo <= lastSeqNo; seqNo++ {
 		key := seqNo&publishIDMask | space
-		packet, err := c.store.Load(key)
+		packet, err := c.persistence.Load(key)
 		if err != nil {
 			return err
 		}
@@ -983,12 +983,12 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	// acknowledge previous packet, if any
 	if len(c.pendingAck) != 0 {
 		if c.pendingAck[0]>>4 == typePUBREC {
-			// BUG(pascaldekloe): Save errors from a Store may cause
-			// duplicate reception for deliveries with the "exactly
-			// once guarantee", if the respective Client goes down
-			// before a recovery/retry succeeds.
+			// BUG(pascaldekloe): Save errors from a Persistence may
+			// cause duplicate reception for deliveries with an
+			// "exactly once guarantee", if the respective Client
+			// goes down before a recovery/retry succeeds.
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
-			err = c.store.Save(key, net.Buffers{c.pendingAck})
+			err = c.persistence.Save(key, net.Buffers{c.pendingAck})
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1165,7 +1165,7 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 		i += 2
 
-		bytes, err := c.store.Load(packetID | remoteIDKeyFlag)
+		bytes, err := c.persistence.Load(packetID | remoteIDKeyFlag)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1198,7 +1198,7 @@ func (c *Client) onPUBREL() error {
 	c.readBuf[0], c.readBuf[1] = typePUBCOMP<<4, 2
 	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
 	c.pendingAck = c.readBuf[:4]
-	err := c.store.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
+	err := c.persistence.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
 	if err != nil {
 		c.pendingAck = nil
 		return err // causes resubmission of PUBREL

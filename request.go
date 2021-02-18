@@ -122,9 +122,6 @@ const (
 	unsubscribeIDSpace = 0x4000
 )
 
-// Packet identifier zero is not in use by the protocol.
-const clientIDKey = 0
-
 // ErrPacketIDSpace signals a response packet with an identifier outside of the
 // respective address spaces, defined by subscribeIDSpace, unsubscribeIDSpace,
 // atLeastOnceIDSpace and exactlyOnceIDSpace. This extra check has a potential
@@ -516,7 +513,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, ErrMax
 		}
 		packetID := applyPublishSeqNo(packet, counter)
-		err = c.store.Save(packetID, packet)
+		err = c.persistence.Save(packetID, packet)
 		if err != nil {
 			sem <- counter // unlock
 			return nil, err
@@ -540,7 +537,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, ErrMax
 		}
 		packetID := applyPublishSeqNo(packet, holdup.UntilSeqNo+1)
-		err = c.store.Save(packetID, packet)
+		err = c.persistence.Save(packetID, packet)
 		if err != nil {
 			block <- holdup // unlock
 			return nil, err
@@ -615,7 +612,7 @@ func (c *Client) onPUBACK() error {
 	}
 
 	// ceil transaction
-	err := c.store.Delete(packetID)
+	err := c.persistence.Delete(packetID)
 	if err != nil {
 		return err // causes resubmission of PUBLISH
 	}
@@ -651,7 +648,7 @@ func (c *Client) onPUBREC() error {
 	c.readBuf[0], c.readBuf[1] = typePUBREL<<4|atLeastOnceLevel<<1, 2
 	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
 	c.pendingAck = c.readBuf[:4]
-	err := c.store.Save(packetID, net.Buffers{c.pendingAck})
+	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck})
 	if err != nil {
 		return err // causes resubmission of PUBLISH (from persistence)
 	}
@@ -691,7 +688,7 @@ func (c *Client) onPUBCOMP() error {
 	}
 
 	// ceil transaction
-	err := c.store.Delete(packetID)
+	err := c.persistence.Delete(packetID)
 	if err != nil {
 		return err // causes resubmission of PUBREL (from persistence)
 	}
@@ -702,15 +699,15 @@ func (c *Client) onPUBCOMP() error {
 
 var errInitTwo = errors.New("mqtt: session already initialized")
 
-// InitSession configures the Store for first use. Brokers use clientID to
+// InitSession configures the Persistence for first use. Brokers use clientID to
 // uniquely identify the session. The session may be continued by using the same
-// Store (content) again with AdoptSession on another Client.
-func (c *Client) InitSession(store Store, clientID string) error {
-	return c.initSession(&ruggedStore{Store: store}, clientID)
+// Persistence (content) again with AdoptSession on another Client.
+func (c *Client) InitSession(p Persistence, clientID string) error {
+	return c.initSession(&ruggedPersistence{Persistence: p}, clientID)
 }
 
-// VolatileSession applies an in-memory Store. This setup is recommended for
-// delivery with the “at most once” guarantee [Publish], and/or for reception
+// VolatileSession applies an in-memory Persistence. This setup is recommended
+// for delivery with the “at most once” guarantee [Publish], and for reception
 // without the “exactly once” guarantee [SubscribeLimitAtLeastOnce], and for
 // testing.
 //
@@ -718,46 +715,46 @@ func (c *Client) InitSession(store Store, clientID string) error {
 // be continued by using the same clientID again. Use CleanSession to prevent
 // reuse of an existing state.
 func (c *Client) VolatileSession(clientID string) error {
-	return c.initSession(newVolatileStore(), clientID)
+	return c.initSession(newVolatilePersistence(), clientID)
 }
 
-func (c *Client) initSession(store Store, clientID string) error {
+func (c *Client) initSession(p Persistence, clientID string) error {
 	if err := stringCheck(clientID); err != nil {
 		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
 	}
-	if c.store != nil {
+	if c.persistence != nil {
 		return errInitTwo
 	}
 
 	// empty check
-	keys, err := store.List()
+	keys, err := p.List()
 	if err != nil {
 		return err
 	}
 	if len(keys) != 0 {
-		return errors.New("mqtt: store already initialized")
+		return errors.New("mqtt: persistence already initialized")
 	}
 
 	// install
-	err = store.Save(clientIDKey, net.Buffers{[]byte(clientID)})
+	err = p.Save(clientIDKey, net.Buffers{[]byte(clientID)})
 	if err != nil {
 		return err
 	}
-	c.store = store
+	c.persistence = p
 	c.writeBlock <- struct{}{}
 	c.atLeastOnceSem <- 0
 	c.exactlyOnceSem <- 0
 	return nil
 }
 
-// AdoptSession continues the session with a Store which had an InitSession once
-// (with another Client).
-func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
-	if c.store != nil {
+// AdoptSession continues the session with a Persistence which had an
+// InitSession already (on another Client).
+func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
+	if c.persistence != nil {
 		return warn, errInitTwo
 	}
 
-	keys, err := store.List()
+	keys, err := p.List()
 	if err != nil {
 		return warn, err
 	}
@@ -768,14 +765,14 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 		if key == clientIDKey || key&remoteIDKeyFlag != 0 {
 			continue
 		}
-		value, err := store.Load(key)
+		value, err := p.Load(key)
 		if err != nil {
 			return warn, err
 		}
 
-		switch packet, seqNo, ok := decodeStoreContent(value); {
+		switch packet, seqNo, ok := decodeValue(value); {
 		case !ok:
-			err := store.Delete(key)
+			err := p.Delete(key)
 			if err != nil {
 				warn = append(warn, fmt.Errorf("mqtt: corrupt record %d not deleted: %s", key, err))
 			} else {
@@ -783,7 +780,7 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 			}
 
 		case len(packet) == 0:
-			err := store.Delete(key)
+			err := p.Delete(key)
 			if err != nil {
 				warn = append(warn, fmt.Errorf("mqtt: somehow empty record %d not deleted: %s", key, err))
 			} else {
@@ -809,8 +806,8 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 			exactlyOnceKeys = append(exactlyOnceKeys, keyPerSeqNo[seqNo])
 		}
 	}
-	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", c.store, &warn)
-	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", c.store, &warn)
+	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", p, &warn)
+	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", p, &warn)
 
 	// “When a Client reconnects with CleanSession set to 0, both the Client
 	// and Server MUST re-send any unacknowledged PUBLISH Packets (where QoS
@@ -852,13 +849,13 @@ func (c *Client) AdoptSession(store Store) (warn []error, fatal error) {
 		c.exactlyOnceSem <- 0
 	}
 
-	c.store = &ruggedStore{Store: store}
+	c.persistence = &ruggedPersistence{Persistence: p}
 	c.writeBlock <- struct{}{}
 
 	return warn, nil
 }
 
-// SeqNos contains Store sequence numbers.
+// SeqNos contains ruggedPersistence sequence numbers.
 type seqNos []uint64
 
 // Len implements sort.Interface.
@@ -871,7 +868,7 @@ func (a seqNos) Less(i, j int) bool { return a[i] < a[j] }
 func (a seqNos) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
 // CleanSeq returs the last uninterrupted sequence from keys.
-func cleanSeq(keys []uint, name string, store Store, warn *[]error) (cleanKeys []uint) {
+func cleanSeq(keys []uint, name string, p Persistence, warn *[]error) (cleanKeys []uint) {
 	for len(keys) != 0 {
 		last := keys[0]
 		for i := 1; ; i++ {
@@ -885,11 +882,11 @@ func cleanSeq(keys []uint, name string, store Store, warn *[]error) (cleanKeys [
 				continue // correct followup
 			}
 
-			*warn = append(*warn, fmt.Errorf("mqtt: %s %#04x–%#04x lost due gap until %#04x; range may be delete failure leftover or gap may be save failure result", name, keys[0], last, key))
+			*warn = append(*warn, fmt.Errorf("mqtt: %s persistence keys %#x–%#x lost due gap until %#x, caused by delete or safe failure", name, keys[0], last, key))
 			for _, key := range keys[:i] {
-				err := store.Delete(key)
+				err := p.Delete(key)
 				if err != nil {
-					*warn = append(*warn, fmt.Errorf("mqtt: %d left in store: %w", key, err))
+					*warn = append(*warn, fmt.Errorf("mqtt: persistence key %#v left as is: %w", key, err))
 				}
 			}
 			keys = keys[i:]

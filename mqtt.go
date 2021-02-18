@@ -174,76 +174,75 @@ func IsConnectionRefused(err error) bool {
 	return false
 }
 
-// Store keys correspond to MQTT packet identifiers.
+// Persistence keys correspond to MQTT packet identifiers.
 const (
-	// Packet identifiers on inbound and outbound requests each have their
-	// own namespace. The most-significant bit on a Store key makes the
-	// distinction.
+	// The 16-bit packet identifiers on inbound and outbound requests each
+	// have their own namespace. The most-significant bit from a key makes
+	// the distinction.
 	remoteIDKeyFlag = 1 << 16
+
+	// Packet identifier zero is not in use by the protocol.
+	// The lookup during CONNECT prevents starts with a broken persistence.
+	clientIDKey = 0
 )
 
-// Store defines session persistence for a Client. A Store may serve only one
-// Client at a time.
+// Persistence tracks the session state as a key–value store. An instance may
+// serve only one Client at a time.
 //
-// Content is addressed by a 17-bit key, mask 0x1ffff.
-// The minimum size for entries is 12 B.
-// The maximum size for entries is 256 MiB + 17 B.
-// Clients apply integrity checks on content.
+// Values are addressed by a 17-bit key, mask 0x1ffff. The minimum size is 12 B.
+// The maximum size is 256 MiB + 17 B. Clients apply integrity checks all round.
 //
-// Methods on a Store may be invoked simultaneously.
-type Store interface {
-	// Load resolves content under a key. A nil return means “not found”.
+// Multiple goroutines may invoke methods on a Persistence simultaneously.
+type Persistence interface {
+	// Load resolves the value of a key. A nil return means “not found”.
 	Load(key uint) ([]byte, error)
 
-	// Save upserts content under a key. The method is expected to operate
-	// in an atomic manner. That is, an error should imply that the content
-	// remains unmodified.
-	Save(key uint, content net.Buffers) error
+	// Save defines the value of a key.
+	Save(key uint, value net.Buffers) error
 
-	// Removes all content under a key in an atomic manner. Deletes of a non
-	// existent content are not considdered to be an error.
+	// Delete clears the value of a key, whether it existed or not.
 	Delete(key uint) error
 
-	// Enumerates all available content.
+	// List enumerates all available in any order.
 	List() (keys []uint, err error)
 }
 
-// Volatile is an in-memory Store.
+// Volatile is an in-memory Persistence.
 type volatile struct {
 	sync.Mutex
 	perKey map[uint][]byte
 }
 
-func newVolatileStore() Store {
+func newVolatilePersistence() Persistence {
 	return &volatile{perKey: make(map[uint][]byte)}
 }
 
-// Load implements the Store interface.
+// Load implements the Persistence interface.
 func (m *volatile) Load(key uint) ([]byte, error) {
 	m.Lock()
 	defer m.Unlock()
 	return m.perKey[key], nil
 }
 
-// Save implements the Store interface.
-func (m *volatile) Save(key uint, content net.Buffers) error {
+// Save implements the Persistence interface.
+func (m *volatile) Save(key uint, value net.Buffers) error {
 	var n int
-	for _, b := range content {
-		n += len(b)
+	for _, buf := range value {
+		n += len(buf)
 	}
-	buf := make([]byte, n)
+	bytes := make([]byte, n)
 	i := 0
-	for _, b := range content {
-		i += copy(buf[i:], b)
+	for _, buf := range value {
+		i += copy(bytes[i:], buf)
 	}
 
 	m.Lock()
 	defer m.Unlock()
-	m.perKey[key] = buf
+	m.perKey[key] = bytes
 	return nil
 }
 
-// Delete implements the Store interface.
+// Delete implements the Persistence interface.
 func (m *volatile) Delete(key uint) error {
 	m.Lock()
 	defer m.Unlock()
@@ -251,7 +250,7 @@ func (m *volatile) Delete(key uint) error {
 	return nil
 }
 
-// List implements the Store interface.
+// List implements the Persistence interface.
 func (m *volatile) List() (keys []uint, err error) {
 	m.Lock()
 	defer m.Unlock()
@@ -262,37 +261,36 @@ func (m *volatile) List() (keys []uint, err error) {
 	return keys, nil
 }
 
-// ruggedStore applies a sequence number plus content integrity checks.
-type ruggedStore struct {
-	Store
-	// Store content is ordered based on this sequence number.
-	// Zero is reserved for the clientIDKey content.
+// ruggedPersistence applies a sequence number plus integrity checks.
+type ruggedPersistence struct {
+	Persistence
+	// Content is ordered based on this sequence number.
+	// Zero gets applied to the clientIDKey value.
 	seqNo uint64
 }
 
-func (r *ruggedStore) Load(key uint) ([]byte, error) {
-	value, err := r.Store.Load(key)
+func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
+	value, err := r.Persistence.Load(key)
 	if err != nil {
 		return nil, err
 	}
 	if value == nil {
 		return nil, nil
 	}
-	value, _, ok := decodeStoreContent(value)
+	value, _, ok := decodeValue(value)
 	if !ok {
-		return nil, fmt.Errorf("mqtt: persistence content from key %#x corrupt", key)
+		return nil, fmt.Errorf("mqtt: persistence value from key %#x corrupt", key)
 	}
 	return value, nil
 }
 
-func (rugged *ruggedStore) Save(key uint, content net.Buffers) error {
-	content = encodeStoreContent(content, atomic.AddUint64(&rugged.seqNo, 1))
-	return rugged.Store.Save(key, content)
+func (rugged *ruggedPersistence) Save(key uint, value net.Buffers) error {
+	return rugged.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&rugged.seqNo, 1)))
 }
 
 var checkTable = crc32.MakeTable(crc32.Castagnoli)
 
-func encodeStoreContent(packet net.Buffers, seqNo uint64) net.Buffers {
+func encodeValue(packet net.Buffers, seqNo uint64) net.Buffers {
 	var sum uint32
 	for _, buf := range packet {
 		sum = crc32.Update(sum, checkTable, buf)
@@ -304,7 +302,7 @@ func encodeStoreContent(packet net.Buffers, seqNo uint64) net.Buffers {
 	return append(packet, buf[:])
 }
 
-func decodeStoreContent(buf []byte) (packet []byte, seqNo uint64, ok bool) {
+func decodeValue(buf []byte) (packet []byte, seqNo uint64, ok bool) {
 	if len(buf) < 12 {
 		return nil, 0, false
 	}

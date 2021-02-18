@@ -49,35 +49,35 @@ func TestNewCONNREQ(t *testing.T) {
 
 func TestPesistenceEmpty(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreEmpty(t, newVolatileStore())
+		testPersistenceEmpty(t, newVolatilePersistence())
 	})
 }
 
-func testStoreEmpty(t *testing.T, x Store) {
-	if data, err := x.Load(42); err != nil {
+func testPersistenceEmpty(t *testing.T, p Persistence) {
+	if data, err := p.Load(42); err != nil {
 		t.Error("Load got error:", err)
 	} else if data != nil {
 		t.Errorf("Load got %#x, want nil", data)
 	}
 
-	if err := x.Delete(42); err != nil {
+	if err := p.Delete(42); err != nil {
 		t.Error("Delete got error:", err)
 	}
 
-	if keys, err := x.List(); err != nil {
+	if keys, err := p.List(); err != nil {
 		t.Error("List got error:", err)
 	} else if len(keys) != 0 {
 		t.Errorf("List got keys %d", keys)
 	}
 }
 
-func TestStore(t *testing.T) {
+func TestPersistence(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStore(t, newVolatileStore())
+		testPersistence(t, newVolatilePersistence())
 	})
 }
 
-func testStore(t *testing.T, x Store) {
+func testPersistence(t *testing.T, p Persistence) {
 	for i := 0; i < 3; i++ {
 		bufs := make(net.Buffers, i+1)
 		for j := range bufs {
@@ -87,13 +87,13 @@ func testStore(t *testing.T, x Store) {
 			}
 		}
 
-		err := x.Save(uint(i), bufs)
+		err := p.Save(uint(i), bufs)
 		if err != nil {
-			t.Errorf("Store %d got error: %s", i, err)
+			t.Errorf("Save %d got error: %s", i, err)
 		}
 	}
 
-	if keys, err := x.List(); err != nil {
+	if keys, err := p.List(); err != nil {
 		t.Error("List got error:", err)
 	} else {
 		// order undefined
@@ -107,90 +107,90 @@ func testStore(t *testing.T, x Store) {
 		}
 	}
 
-	if data, err := x.Load(0); err != nil {
+	if data, err := p.Load(0); err != nil {
 		t.Error("Load 0 got error:", err)
 	} else if want := "a"; string(data) != want {
 		t.Errorf("Load 0 got %q, want %q", data, want)
 	}
-	if data, err := x.Load(1); err != nil {
+	if data, err := p.Load(1); err != nil {
 		t.Error("Load 1 got error:", err)
 	} else if want := "aab"; string(data) != want {
 		t.Errorf("Load 1 got %q, want %q", data, want)
 	}
-	if data, err := x.Load(2); err != nil {
+	if data, err := p.Load(2); err != nil {
 		t.Error("Load 2 got error:", err)
 	} else if want := "aababc"; string(data) != want {
 		t.Errorf("Load 2 got %q, want %q", data, want)
 	}
 }
 
-func TestStoreUpdate(t *testing.T) {
+func TestPersistenceUpdate(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreUpdate(t, newVolatileStore())
+		testPersistenceUpdate(t, newVolatilePersistence())
 	})
 }
 
-func testStoreUpdate(t *testing.T, x Store) {
-	err := x.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
+func testPersistenceUpdate(t *testing.T, p Persistence) {
+	err := p.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
 	if err != nil {
-		t.Fatal("Store new 0 got error:", err)
+		t.Fatal("Save new 0 got error:", err)
 	}
-	err = x.Save(42, net.Buffers{[]byte("ef")})
+	err = p.Save(42, net.Buffers{[]byte("ef")})
 	if err != nil {
-		t.Fatal("Store new 42 got error:", err)
+		t.Fatal("Save new 42 got error:", err)
 	}
-	err = x.Save(0, net.Buffers{[]byte("12")})
+	err = p.Save(0, net.Buffers{[]byte("12")})
 	if err != nil {
-		t.Fatal("Store update 0 got error:", err)
+		t.Fatal("Save update 0 got error:", err)
 	}
-	err = x.Save(42, net.Buffers{[]byte("34"), []byte("56")})
+	err = p.Save(42, net.Buffers{[]byte("34"), []byte("56")})
 	if err != nil {
-		t.Fatal("Store update 42 got error:", err)
+		t.Fatal("Save update 42 got error:", err)
 	}
 
-	if data, err := x.Load(0); err != nil {
+	if data, err := p.Load(0); err != nil {
 		t.Error("Load 0 got error:", err)
 	} else if want := "12"; string(data) != want {
 		t.Errorf("Load 0 got %#v, want %#v", data, want)
 	}
-	if data, err := x.Load(42); err != nil {
+	if data, err := p.Load(42); err != nil {
 		t.Error("Load 42 got error:", err)
 	} else if want := "3456"; string(data) != want {
 		t.Errorf("Load 42 got %#v, want %#v", data, want)
 	}
 }
 
-func TestStoreDelete(t *testing.T) {
+func TestPersistenceDelete(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
-		testStoreDelete(t, newVolatileStore())
+		testPersistenceDelete(t, newVolatilePersistence())
 	})
 }
 
-func testStoreDelete(t *testing.T, x Store) {
-	err := x.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
+func testPersistenceDelete(t *testing.T, p Persistence) {
+	err := p.Save(0, net.Buffers{[]byte("ab"), []byte("cd")})
 	if err != nil {
-		t.Fatal("Store new 0 got error:", err)
+		t.Fatal("Save new 0 got error:", err)
 	}
-	err = x.Save(42, net.Buffers{[]byte("ef")})
+	err = p.Save(42, net.Buffers{[]byte("ef")})
 	if err != nil {
-		t.Fatal("Store new 42 got error:", err)
+		t.Fatal("Save new 42 got error:", err)
 	}
-	err = x.Save(42, net.Buffers{[]byte("gh")})
+	err = p.Save(42, net.Buffers{[]byte("gh")})
 	if err != nil {
-		t.Fatal("Store update 42 got error:", err)
+		t.Fatal("Save update 42 got error:", err)
 	}
-	err = x.Save(99, net.Buffers{[]byte("ij")})
+	err = p.Save(99, net.Buffers{[]byte("ij")})
 	if err != nil {
-		t.Fatal("Store new 99 got error:", err)
+		t.Fatal("Save new 99 got error:", err)
 	}
 
-	if err := x.Delete(42); err != nil {
+	if err := p.Delete(42); err != nil {
 		t.Error("Delete 42 got error:", err)
 	}
-	if err := x.Delete(0); err != nil {
+	if err := p.Delete(0); err != nil {
 		t.Error("Delete 0 got error:", err)
 	}
-	if keys, err := x.List(); err != nil {
+	if keys, err := p.List(); err != nil {
 		t.Error("List got error:", err)
 	} else if len(keys) != 1 || keys[0] != 99 {
 		t.Errorf("List got %d, want %d", keys, []uint{99})
