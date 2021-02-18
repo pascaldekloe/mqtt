@@ -697,66 +697,61 @@ func (c *Client) onPUBCOMP() error {
 	return nil
 }
 
-var errInitTwo = errors.New("mqtt: session already initialized")
-
 // InitSession configures the Persistence for first use. Brokers use clientID to
-// uniquely identify the session. The session may be continued by using the same
-// Persistence (content) again with AdoptSession on another Client.
-func (c *Client) InitSession(p Persistence, clientID string) error {
-	return c.initSession(&ruggedPersistence{Persistence: p}, clientID)
+// uniquely identify the session. The session may be continued with AdoptSession
+// on another Client.
+func InitSession(clientID string, p Persistence, c *Config) (*Client, error) {
+	return initSession(clientID, &ruggedPersistence{Persistence: p}, c)
 }
 
-// VolatileSession applies an in-memory Persistence. This setup is recommended
-// for delivery with the “at most once” guarantee [Publish], and for reception
+// VolatileSession operates solely in-memory. This setup is recommended for
+// delivery with the “at most once” guarantee [Publish], and for reception
 // without the “exactly once” guarantee [SubscribeLimitAtLeastOnce], and for
 // testing.
 //
 // Brokers use clientID to uniquely identify the session. Volatile sessions may
 // be continued by using the same clientID again. Use CleanSession to prevent
 // reuse of an existing state.
-func (c *Client) VolatileSession(clientID string) error {
-	return c.initSession(newVolatilePersistence(), clientID)
+func VolatileSession(clientID string, c *Config) (*Client, error) {
+	return initSession(clientID, newVolatilePersistence(), c)
 }
 
-func (c *Client) initSession(p Persistence, clientID string) error {
+func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
 	if err := stringCheck(clientID); err != nil {
-		return fmt.Errorf("mqtt: illegal client identifier: %w", err)
+		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
 	}
-	if c.persistence != nil {
-		return errInitTwo
+	if err := c.valid(); err != nil {
+		return nil, err
 	}
 
 	// empty check
 	keys, err := p.List()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(keys) != 0 {
-		return errors.New("mqtt: persistence already initialized")
+		return nil, errors.New("mqtt: persistence not empty")
 	}
 
 	// install
 	err = p.Save(clientIDKey, net.Buffers{[]byte(clientID)})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.persistence = p
-	c.writeBlock <- struct{}{}
-	c.atLeastOnceSem <- 0
-	c.exactlyOnceSem <- 0
-	return nil
+
+	return newClient(p, c), nil
 }
 
 // AdoptSession continues the session with a Persistence which had an
 // InitSession already (on another Client).
-func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
-	if c.persistence != nil {
-		return warn, errInitTwo
+func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal error) {
+	if err := c.valid(); err != nil {
+		return nil, warn, err
 	}
 
 	keys, err := p.List()
 	if err != nil {
-		return warn, err
+		return nil, warn, err
 	}
 	seqNos := make(seqNos, len(keys))
 	keyPerSeqNo := make(map[uint64]uint, len(keys))
@@ -767,7 +762,7 @@ func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
 		}
 		value, err := p.Load(key)
 		if err != nil {
-			return warn, err
+			return nil, warn, err
 		}
 
 		switch packet, seqNo, ok := decodeValue(value); {
@@ -809,6 +804,8 @@ func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
 	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", p, &warn)
 	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", p, &warn)
 
+	client = newClient(&ruggedPersistence{Persistence: p}, c)
+
 	// “When a Client reconnects with CleanSession set to 0, both the Client
 	// and Server MUST re-send any unacknowledged PUBLISH Packets (where QoS
 	// > 0) and PUBREL Packets using their original Packet Identifiers.”
@@ -816,14 +813,13 @@ func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
 
 	if len(atLeastOnceKeys) != 0 {
 		for n := 0; n < len(atLeastOnceKeys); n++ {
-			c.ackQ <- nil
+			client.ackQ <- nil
 		}
-		c.atLeastOnceBlock <- holdup{
+		<-client.atLeastOnceSem
+		client.atLeastOnceBlock <- holdup{
 			SinceSeqNo: atLeastOnceKeys[0],
 			UntilSeqNo: atLeastOnceKeys[len(atLeastOnceKeys)-1],
 		}
-	} else {
-		c.atLeastOnceSem <- 0
 	}
 
 	releaseOffset := len(exactlyOnceKeys)
@@ -835,24 +831,21 @@ func (c *Client) AdoptSession(p Persistence) (warn []error, fatal error) {
 		releaseOffset--
 	}
 	for _, key := range exactlyOnceKeys[releaseOffset:] {
-		c.pendingAck = append(c.pendingAck, PUBRELPerKey[key]...)
-		c.compQ <- nil
+		client.pendingAck = append(client.pendingAck, PUBRELPerKey[key]...)
+		client.compQ <- nil
 	}
 	if releaseOffset > 0 {
-		c.exactlyOnceBlock <- holdup{
+		<-client.exactlyOnceSem
+		client.exactlyOnceBlock <- holdup{
 			SinceSeqNo: exactlyOnceKeys[0],
 			UntilSeqNo: exactlyOnceKeys[releaseOffset-1],
 		}
 	} else if len(exactlyOnceKeys) != 0 {
-		c.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
-	} else {
-		c.exactlyOnceSem <- 0
+		<-client.exactlyOnceSem
+		client.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
 	}
 
-	c.persistence = &ruggedPersistence{Persistence: p}
-	c.writeBlock <- struct{}{}
-
-	return warn, nil
+	return client, warn, nil
 }
 
 // SeqNos contains ruggedPersistence sequence numbers.

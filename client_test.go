@@ -35,20 +35,24 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 	})
 
 	var dialN int
-	client := mqtt.NewClient(&mqtt.Config{
+	client, err := mqtt.VolatileSession("", &mqtt.Config{
 		WireTimeout:    time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
-	}, func(context.Context) (net.Conn, error) {
-		dialN++
-		t.Log("Dial #", dialN)
-		if dialN > len(conns) {
-			block, _ := net.Pipe()
-			time.Sleep(time.Second / 16)
-			return block, nil
-		}
-		return conns[dialN-1], nil
+		Dialer: func(context.Context) (net.Conn, error) {
+			dialN++
+			t.Log("Dial #", dialN)
+			if dialN > len(conns) {
+				block, _ := net.Pipe()
+				time.Sleep(time.Second / 16)
+				return block, nil
+			}
+			return conns[dialN-1], nil
+		},
 	})
+	if err != nil {
+		t.Fatal("volatile session error:", err)
+	}
 
 	readRoutineDone := testRoutine(t, func() {
 		defer func() {
@@ -125,10 +129,12 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 }
 
 func TestClose(t *testing.T) {
-	client := mqtt.NewClient(&mqtt.Config{WireTimeout: time.Second / 2}, func(context.Context) (net.Conn, error) {
-		return nil, errors.New("dialer invoked")
+	client, err := mqtt.VolatileSession("test-client", &mqtt.Config{
+		Dialer: func(context.Context) (net.Conn, error) {
+			return nil, errors.New("dialer invoked")
+		},
+		WireTimeout: time.Second / 2,
 	})
-	err := client.VolatileSession("test-client")
 	if err != nil {
 		t.Fatal("volatile session error:", err)
 	}
@@ -228,17 +234,21 @@ func TestDown(t *testing.T) {
 	brokerEnd, clientEnd := net.Pipe()
 
 	var dialN int
-	client := mqtt.NewClient(&mqtt.Config{
+	client, err := mqtt.VolatileSession("", &mqtt.Config{
+		Dialer: func(context.Context) (net.Conn, error) {
+			dialN++
+			if dialN > 1 {
+				return nil, errors.New("no more connections for test")
+			}
+			return clientEnd, nil
+		},
 		WireTimeout:    time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
-	}, func(context.Context) (net.Conn, error) {
-		dialN++
-		if dialN > 1 {
-			return nil, errors.New("no more connections for test")
-		}
-		return clientEnd, nil
 	})
+	if err != nil {
+		t.Fatal("volatile session error:", err)
+	}
 
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, brokerEnd, newClientCONNECTHex)

@@ -76,8 +76,10 @@ func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 	}
 }
 
-// Config is a Client configuration.
+// Config is a Client configuration. Dialer is the only required field.
 type Config struct {
+	Dialer // chooses the broker
+
 	// WireTimeout sets the minimim transfer rate as one byte per duration.
 	// Zero disables timeout protection, which leaves the Client vulnerable
 	// to blocking on stale connections.
@@ -120,28 +122,32 @@ type Config struct {
 	CleanSession bool
 }
 
+var errNoDialer = errors.New("mqtt: configuration has no dialer set")
+
+func (c *Config) valid() error {
+	if c.Dialer == nil {
+		return errNoDialer
+	}
+	if err := stringCheck(c.UserName); err != nil {
+		return fmt.Errorf("mqtt: illegal user name: %w", err)
+	}
+	if len(c.Password) > stringMax {
+		return fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
+	}
+	if err := stringCheck(c.Will.Topic); err != nil {
+		return fmt.Errorf("mqtt: illegal will topic: %w", err)
+	}
+	if len(c.Will.Message) > stringMax {
+		return fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
+	}
+	return nil
+}
+
 // NewCONNREQ returns a new packet.
-func (c *Client) newCONNREQ() ([]byte, error) {
-	err := c.VolatileSession("")
-	if err != nil && err != errInitTwo {
-		return nil, err
-	}
-
-	clientID, err := c.persistence.Load(clientIDKey)
-	if err != nil {
-		return nil, err
-	}
-	err = stringCheck(string(clientID))
-	if err != nil {
-		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
-	}
-
+func (c *Config) newCONNREQ(clientID []byte) []byte {
 	size := 12 + len(clientID)
 	var flags uint
 
-	if err := stringCheck(c.UserName); err != nil {
-		return nil, fmt.Errorf("mqtt: illegal user name: %w", err)
-	}
 	// Supply an empty user name when the password is set to comply with “If
 	// the User Name Flag is set to 0, the Password Flag MUST be set to 0.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.2-22
@@ -149,22 +155,12 @@ func (c *Client) newCONNREQ() ([]byte, error) {
 		size += 2 + len(c.UserName)
 		flags |= 1 << 7
 	}
-
-	if len(c.Password) > stringMax {
-		return nil, fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
-	}
 	if c.Password != nil {
 		size += 2 + len(c.Password)
 		flags |= 1 << 6
 	}
 
 	if c.Will.Message != nil {
-		if err := stringCheck(c.Will.Topic); err != nil {
-			return nil, fmt.Errorf("mqtt: illegal will topic: %w", err)
-		}
-		if len(c.Will.Message) > stringMax {
-			return nil, fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
-		}
 		size += 4 + len(c.Will.Topic) + len(c.Will.Message)
 		if c.Will.Retain {
 			flags |= 1 << 5
@@ -209,19 +205,23 @@ func (c *Client) newCONNREQ() ([]byte, error) {
 		packet = append(packet, byte(len(c.Password)>>8), byte(len(c.Password)))
 		packet = append(packet, c.Password...)
 	}
-	return packet, nil
+	return packet
 }
 
-// Client manages a network connection. A single goroutine must invoke
-// ReadSlices consecutively until ErrClosed. Some backoff on error reception
-// comes recommended though.
+// Client manages a network connection until Close or Disconnect. Clients always
+// start in the Offline state. The (un)subscribe, publish and ping methods block
+// until the first connect attempt (from ReadSlices) completes. When the connect
+// attempt fails, then requests receive ErrDown until a retry succeeds. The same
+// goes for the automatic reconnects on connection loss.
 //
-// Multiple goroutines may invoke methods on a Conn simultaneously, except for
+// A single goroutine must invoke ReadSlices consecutively until ErrClosed. Some
+// backoff on error reception comes recommended though.
+//
+// Multiple goroutines may invoke methods on a Client simultaneously, except for
 // ReadSlices.
 type Client struct {
 	Config // read-only
 
-	dialer      Dialer      // chooses the broker
 	persistence Persistence // tracks the session
 
 	// Signal channels are closed once their respective state occurs.
@@ -278,14 +278,7 @@ type Client struct {
 	bigMessage *BigMessage
 }
 
-// NewClient returns a new Client. Configuration errors result in IsDeny on
-// ReadSlices. The Client may be initialized next, with either an InitSession,
-// AdoptSession or VolatileSession.
-func NewClient(config *Config, dialer Dialer) *Client {
-	if dialer == nil {
-		panic("nil Dialer")
-	}
-
+func newClient(p Persistence, config *Config) *Client {
 	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
 		config.AtLeastOnceMax = publishIDMask
@@ -296,7 +289,7 @@ func NewClient(config *Config, dialer Dialer) *Client {
 
 	c := &Client{
 		Config:           *config, // copy
-		dialer:           dialer,
+		persistence:      p,
 		onlineSig:        make(chan chan struct{}, 1),
 		offlineSig:       make(chan chan struct{}, 1),
 		connSem:          make(chan net.Conn, 1),
@@ -323,6 +316,9 @@ func NewClient(config *Config, dialer Dialer) *Client {
 
 	c.connSem <- nil
 	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
+	c.writeBlock <- struct{}{}
+	c.atLeastOnceSem <- 0
+	c.exactlyOnceSem <- 0
 	return c
 }
 
@@ -753,10 +749,11 @@ func (c *Client) peekPacket() (head byte, err error) {
 // Connect installs the transport layer. The current
 // connection must be closed in case of a reconnect.
 func (c *Client) connect() error {
-	packet, err := c.newCONNREQ()
+	clientID, err := c.persistence.Load(clientIDKey)
 	if err != nil {
 		return err
 	}
+	packet := c.newCONNREQ(clientID)
 
 	<-c.Offline() // extra verification
 
@@ -792,7 +789,7 @@ func (c *Client) connect() error {
 	}
 	ctx, cancel := context.WithTimeout(c.dialCtx, c.WireTimeout)
 	defer cancel()
-	conn, err := c.dialer(ctx)
+	conn, err := c.Dialer(ctx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
@@ -954,7 +951,7 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 // BigMessage leaves the memory allocation choice to the consumer. Any other
 // error puts the Client in an ErrDown state. Invocation should apply a backoff
 // once down. Retries on IsConnectionRefused, if any, should probably apply a
-// rather large backoff. See the NewClient example for a complete setup.
+// rather large backoff. See the Client example for a complete setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	// A pending BigMessage implies that the connection was functional on
 	// the last return.

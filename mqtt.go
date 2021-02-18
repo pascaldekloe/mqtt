@@ -107,7 +107,7 @@ func IsDeny(err error) bool {
 	for err != nil {
 		switch err {
 		case errPacketMax, errStringMax, errUTF8, errNull,
-			errSubscribeNone, errUnsubscribeNone:
+			errNoDialer, errSubscribeNone, errUnsubscribeNone:
 			return true
 		}
 		err = errors.Unwrap(err)

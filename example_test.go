@@ -37,10 +37,13 @@ func init() {
 }
 
 // It is good practice to install the client from main.
-func ExampleNewClient_setup() {
-	client := mqtt.NewClient(&mqtt.Config{WireTimeout: time.Second}, mqtt.NewDialer("tcp", "localhost:1883"))
-	if err := client.VolatileSession("demo-client"); err != nil {
-		log.Fatal("exit on ", err)
+func ExampleClient_setup() {
+	client, err := mqtt.VolatileSession("demo-client", &mqtt.Config{
+		Dialer:      mqtt.NewDialer("tcp", "localhost:1883"),
+		WireTimeout: time.Second,
+	})
+	if err != nil {
+		log.Fatal("exit on broken setup: ", err)
 	}
 
 	// launch read-routine
@@ -55,9 +58,6 @@ func ExampleNewClient_setup() {
 
 			case errors.Is(err, mqtt.ErrClosed):
 				return // terminated
-
-			case mqtt.IsDeny(err):
-				log.Fatal("unusable configuration: ", err)
 
 			case errors.As(err, &big):
 				log.Printf("%d byte content skipped", big.Size)
