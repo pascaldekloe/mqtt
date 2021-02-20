@@ -9,12 +9,12 @@ import (
 
 // Signatures
 var (
-	client      mqtt.Client
-	subscribe   = client.Subscribe
-	unsubscribe = client.Unsubscribe
-	publish     = client.Publish
-	publishAck  = client.PublishAtLeastOnce
-	readSlices  = client.ReadSlices
+	client          mqtt.Client
+	subscribe       = client.Subscribe
+	unsubscribe     = client.Unsubscribe
+	publish         = client.Publish
+	publishEnqueued = client.PublishAtLeastOnce
+	readSlices      = client.ReadSlices
 )
 
 // Won't compile on failure.
@@ -23,13 +23,13 @@ func TestSignatureMatch(t *testing.T) {
 	// check dupe assumptions
 	subscribe = c.SubscribeLimitAtMostOnce
 	subscribe = c.SubscribeLimitAtLeastOnce
-	publishAck = c.PublishExactlyOnce
+	publishEnqueued = c.PublishExactlyOnce
 
 	// check fits
 	readSlices = mqtttest.NewReadSlicesMock(t)
 	publish = mqtttest.NewPublishMock(t)
 	publish = mqtttest.NewPublishStub(nil)
-	publishAck = mqtttest.NewPublishAckStub(nil)
+	publishEnqueued = mqtttest.NewPublishEnqueuedStub(nil)
 	subscribe = mqtttest.NewSubscribeMock(t)
 	subscribe = mqtttest.NewSubscribeStub(nil)
 	unsubscribe = mqtttest.NewUnsubscribeMock(t)

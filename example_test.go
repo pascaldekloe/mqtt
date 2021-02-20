@@ -29,18 +29,14 @@ var Online func() <-chan struct{}
 func init() {
 	PublishAtLeastOnce = mqtttest.NewPublishAckStub(nil)
 	Subscribe = mqtttest.NewSubscribeStub(nil)
-	Online = func() <-chan struct{} {
-		ch := make(chan struct{})
-		close(ch)
-		return ch
-	}
+	Online = func() <-chan struct{} { return nil }
 }
 
 // It is good practice to install the client from main.
 func ExampleClient_setup() {
 	client, err := mqtt.VolatileSession("demo-client", &mqtt.Config{
 		Dialer:      mqtt.NewDialer("tcp", "localhost:1883"),
-		WireTimeout: time.Second,
+		WireTimeout: 4 * time.Second,
 	})
 	if err != nil {
 		log.Fatal("exit on broken setup: ", err)
@@ -50,27 +46,27 @@ func ExampleClient_setup() {
 	go func() {
 		var big *mqtt.BigMessage
 		for {
-			message, channel, err := client.ReadSlices()
+			message, topic, err := client.ReadSlices()
 			switch {
 			case err == nil:
 				// do something with inbound message
-				log.Printf("📥 %q: %q", channel, message)
+				log.Printf("📥 %q: %q", topic, message)
+
+			case errors.As(err, &big):
+				log.Printf("📥 %q: %d byte message omitted", big.Topic, big.Size)
 
 			case errors.Is(err, mqtt.ErrClosed):
 				log.Print(err)
 				return // terminated
 
-			case errors.As(err, &big):
-				log.Printf("%d byte content skipped", big.Size)
-
 			case mqtt.IsConnectionRefused(err):
-				log.Print(err)
+				log.Print("queue unavailable: ", err)
 				// ErrDown for a while
-				time.Sleep(15*time.Minute - time.Second)
+				time.Sleep(15 * time.Minute)
 
 			default:
-				log.Print("MQTT unavailable: ", err)
-				// ErrDown for short backoff
+				log.Print("queue unavailable: ", err)
+				// ErrDown during backoff
 				time.Sleep(2 * time.Second)
 			}
 		}
@@ -106,83 +102,110 @@ func ExampleClient_setup() {
 	// Output:
 }
 
-// Error scenario and how to act uppon them.
-func ExampleClient_PublishAtLeastOnce_hasty() {
+// Demonstrates all error scenario and the respective recovery options.
+func ExampleClient_PublishAtLeastOnce_critical() {
 	for {
-		ack, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
+		exchange, err := PublishAtLeastOnce([]byte("🍸🆘"), "demo/alert")
 		switch {
 		case err == nil:
-			fmt.Println("alert submitted")
+			fmt.Println("alert submitted…")
+			break
 
 		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
 			fmt.Println("🚨 alert not send:", err)
 			return
 
-		case errors.Is(err, mqtt.ErrDown):
-			fmt.Println("⚠️ alert delay:", err)
-			<-Online()
-
 		case errors.Is(err, mqtt.ErrMax):
-			fmt.Println("⚠️ alert delay:", err)
+			fmt.Println("⚠️ alert submission hold-up:", err)
 			time.Sleep(time.Second / 4)
 			continue
 
 		default:
-			fmt.Println("⚠️ alert delay on persistence malfunction:", err)
-			time.Sleep(time.Second)
+			fmt.Println("⚠️ alert submission blocked on persistence malfunction:", err)
+			time.Sleep(4 * time.Second)
 			continue
 		}
 
-		for err := range ack {
+		for err := range exchange {
 			if errors.Is(err, mqtt.ErrClosed) {
-				fmt.Println("🚨 alert suspended:", err)
-				// Submission will continue when the Client
-				// is restarted with the same Store again.
+				fmt.Println("🚨 alert exchange suspended:", err)
+				// An AdoptSession may continue the transaction.
 				return
 			}
-			fmt.Println("⚠️ alert delay on connection malfunction:", err)
+
+			fmt.Println("⚠️ alert request transfer interupted:", err)
 		}
-		fmt.Println("alert confirmed")
+		fmt.Println("alert acknowledged ✓")
 		break
 	}
+
 	// Output:
-	// alert submitted
-	// alert confirmed
+	// alert submitted…
+	// alert acknowledged ✓
 }
 
-// Error scenario and how to act uppon them.
+// Demonstrates all error scenario and the respective recovery options.
 func ExampleClient_Subscribe_sticky() {
-	const topicFilter = "demo/+"
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	for {
-		err := Subscribe(ctx.Done(), topicFilter)
+		err := Subscribe(ctx.Done(), "demo/+")
 		switch {
 		case err == nil:
-			fmt.Printf("subscribed to %q", topicFilter)
+			fmt.Println("subscribe confirmed by broker")
 			return
 
-		case mqtt.IsDeny(err), errors.Is(err, mqtt.ErrClosed):
-			fmt.Print("no subscribe: ", err)
+		case errors.As(err, new(mqtt.SubscribeError)):
+			fmt.Println("subscribe failed by broker")
 			return
 
-		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
-			fmt.Print("subscribe timeout: ", err)
+		case mqtt.IsDeny(err): // illegal topic filter
+			fmt.Println(err)
 			return
+
+		case errors.Is(err, mqtt.ErrClosed):
+			fmt.Println("no subscribe due client close")
+			return
+
+		case errors.Is(err, mqtt.ErrCanceled):
+			fmt.Println("no subscribe due timeout")
+			return
+
+		case errors.Is(err, mqtt.ErrAbandoned):
+			fmt.Println("subscribe state unknown due timeout")
+			return
+
+		case errors.Is(err, mqtt.ErrBreak):
+			fmt.Println("subscribe state unknown due connection loss")
+			select {
+			case <-Online():
+				fmt.Println("subscribe retry with new connection")
+			case <-ctx.Done():
+				fmt.Println("subscribe timeout")
+				return
+			}
 
 		case errors.Is(err, mqtt.ErrDown):
-			<-Online()
+			fmt.Println("subscribe delay while service is down")
+			select {
+			case <-Online():
+				fmt.Println("subscribe retry with new connection")
+			case <-ctx.Done():
+				fmt.Println("subscribe timeout")
+				return
+			}
 
-		case errors.Is(err, mqtt.ErrMax):
-			time.Sleep(time.Second / 2)
+		case errors.Is(err, mqtt.ErrMax): // limit is quite high
+			fmt.Println("subscribe hold-up:", err)
+			time.Sleep(2 * time.Second) // backoff
 
 		default:
-			backoff := 4 * time.Second
-			fmt.Printf("subscribe retry in %s on: %s", backoff, err)
-			time.Sleep(backoff)
+			fmt.Println("subscribe request transfer interupted:", err)
+			time.Sleep(time.Second / 2) // backoff
 		}
 	}
+
 	// Output:
-	// subscribed to "demo/+"
+	// subscribe confirmed by broker
 }

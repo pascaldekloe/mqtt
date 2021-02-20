@@ -24,7 +24,7 @@ var readBufSize = 128 * 1024
 var ErrDown = errors.New("mqtt: connection unavailable")
 
 // ErrClosed signals use after Close. The state is permanent.
-// Further invocation will again result in the same error.
+// Further invocation will result again in an ErrClosed error.
 var ErrClosed = errors.New("mqtt: client closed")
 
 // ErrBrokerTerm signals connection loss for unknown reasons.
@@ -462,12 +462,12 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.unorderedTxs.close()
+		c.unorderedTxs.breakAll()
 	}()
 
 	select {
 	case ack := <-c.pingAck:
-		ack <- ErrClosed
+		ack <- ErrBreak
 	default:
 		break
 	}
@@ -537,6 +537,14 @@ func (c *Client) toOffline() {
 	default:
 		c.onlineSig <- on
 	}
+
+	select {
+	case ack := <-c.pingAck:
+		ack <- ErrBreak
+	default:
+		break
+	}
+	c.unorderedTxs.breakAll()
 }
 
 func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {

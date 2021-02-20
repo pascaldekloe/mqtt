@@ -95,51 +95,51 @@ func NewPublishStub(returnFix error) func(quit <-chan struct{}, message []byte, 
 	}
 }
 
-// AckBlock prevents ack <-chan error submission.
-type AckBlock struct {
+// ExchangeBlock prevents exchange <-chan error submission.
+type ExchangeBlock struct {
 	Delay time.Duration // zero defaults to indefinite
 }
 
 // Error implements the standard error interface.
-func (b AckBlock) Error() string {
-	return "mqtttest: AckBlock used as an error"
+func (b ExchangeBlock) Error() string {
+	return "mqtttest: ExchangeBlock used as an error"
 }
 
-// NewPublishAckStub returns a stub for mqtt.Client PublishAtLeastOnce or
+// NewPublishEnqueuedStub returns a stub for mqtt.Client PublishAtLeastOnce or
 // PublishExactlyOnce with a fixed return value.
 //
-// The ackFix errors are applied to the ack return, with an option for AckBlock
-// entries. An mqtt.ErrClosed in the ackFix keeps the ack channel open (without
-// an extra AckBlock entry.
-func NewPublishAckStub(errFix error, ackFix ...error) func(message []byte, topic string) (ack <-chan error, err error) {
-	if errFix != nil && len(ackFix) != 0 {
-		panic("ackFix entries with non-nil errFix")
+// The exchangeFix errors are applied to the exchange return, with an option for
+// ExchangeBlock entries. An mqtt.ErrClosed in the exchangeFix keeps the
+// exchange channel open (without an extra ExchangeBlock entry).
+func NewPublishEnqueuedStub(errFix error, exchangeFix ...error) func(message []byte, topic string) (exchange <-chan error, err error) {
+	if errFix != nil && len(exchangeFix) != 0 {
+		panic("exchangeFix entries with non-nil errFix")
 	}
-	var block AckBlock
-	for i, err := range ackFix {
+	var block ExchangeBlock
+	for i, err := range exchangeFix {
 		switch {
 		case err == nil:
-			panic("nil entry in ackFix")
+			panic("nil entry in exchangeFix")
 		case errors.Is(err, mqtt.ErrClosed):
-			if i+1 < len(ackFix) {
-				panic("followup of mqtt.ErrClosed ackFix entry")
+			if i+1 < len(exchangeFix) {
+				panic("followup on mqtt.ErrClosed exchangeFix entry")
 			}
 		case errors.As(err, &block):
-			if block.Delay == 0 && i+1 < len(ackFix) {
-				panic("followup of indefinite AckBlock ackFix entry")
+			if block.Delay == 0 && i+1 < len(exchangeFix) {
+				panic("followup on indefinite ExchangeBlock exchangeFix entry")
 			}
 		}
 	}
 
-	return func(message []byte, topic string) (ack <-chan error, err error) {
+	return func(message []byte, topic string) (exchange <-chan error, err error) {
 		if errFix != nil {
 			return nil, errFix
 		}
 
-		ch := make(chan error, len(ackFix))
+		ch := make(chan error, len(exchangeFix))
 		go func() {
-			var block AckBlock
-			for _, err := range ackFix {
+			var block ExchangeBlock
+			for _, err := range exchangeFix {
 				switch {
 				default:
 					ch <- err

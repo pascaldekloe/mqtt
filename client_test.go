@@ -282,45 +282,37 @@ func TestDown(t *testing.T) {
 		if !errors.Is(err, mqtt.ErrDown) {
 			t.Errorf("PublishRetained round %d got error %q, want an ErrDown", roundN, err)
 		}
-		ack, err := client.PublishAtLeastOnce(nil, "x")
+		_, err = client.PublishAtLeastOnce(nil, "x")
 		if roundN > 1 {
 			if !errors.Is(err, mqtt.ErrMax) {
 				t.Errorf("PublishAtLeastOnce round %d got error %q, want an ErrMax", roundN, err)
 			}
 		} else if err != nil {
 			t.Errorf("PublishAtLeastOnce round %d got error %q", roundN, err)
-		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
-			t.Errorf("PublishAtLeastOnce round %d ack got error %q, want an ErrDown", roundN, err)
 		}
-		ack, err = client.PublishAtLeastOnceRetained(nil, "x")
+		_, err = client.PublishAtLeastOnceRetained(nil, "x")
 		if roundN > 1 {
 			if !errors.Is(err, mqtt.ErrMax) {
 				t.Errorf("PublishAtLeastOnceRetained round %d got error %q, want an ErrMax", roundN, err)
 			}
 		} else if err != nil {
 			t.Errorf("PublishAtLeastOnceRetained round %d got error %q", roundN, err)
-		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
-			t.Errorf("PublishAtLeastOnceRetained round %d ack got error %q, want an ErrDown", roundN, err)
 		}
-		ack, err = client.PublishExactlyOnce(nil, "x")
+		_, err = client.PublishExactlyOnce(nil, "x")
 		if roundN > 1 {
 			if !errors.Is(err, mqtt.ErrMax) {
 				t.Errorf("PublishExactlyOnce round %d got error %q, want an ErrMax", roundN, err)
 			}
 		} else if err != nil {
 			t.Errorf("PublishExactlyOnce round %d got error %q", roundN, err)
-		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
-			t.Errorf("PublishExactlyOnce round %d ack got error %q, want an ErrDown", roundN, err)
 		}
-		ack, err = client.PublishExactlyOnceRetained(nil, "x")
+		_, err = client.PublishExactlyOnceRetained(nil, "x")
 		if roundN > 1 {
 			if !errors.Is(err, mqtt.ErrMax) {
 				t.Errorf("PublishExactlyOnceRetained round %d got error %q, want an ErrMax", roundN, err)
 			}
 		} else if err != nil {
 			t.Errorf("PublishExactlyOnceRetained round %d got error %q", roundN, err)
-		} else if err := <-ack; !errors.Is(err, mqtt.ErrDown) {
-			t.Errorf("PublishExactlyOnceRetained round %d ack got error %q, want an ErrDown", roundN, err)
 		}
 		err = client.Ping(nil)
 		if !errors.Is(err, mqtt.ErrDown) {

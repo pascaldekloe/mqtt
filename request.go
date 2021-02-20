@@ -20,8 +20,12 @@ var ErrMax = errors.New("mqtt: maximum number of pending requests reached")
 var ErrCanceled = errors.New("mqtt: request canceled before submission")
 
 // ErrAbandoned means that a quit signal got applied after the request was send.
-// The result remains unknown, as opposed to ErrCanceled.
+// The broker received the request, yet the result/reponse remains unkown.
 var ErrAbandoned = errors.New("mqtt: request abandoned after submission")
+
+// ErrBreak means that the connection broke up after the request was send.
+// The broker received the request, yet the result/reponse remains unkown.
+var ErrBreak = errors.New("mqtt: connection lost while awaiting response")
 
 // BufSize should fit topic names with a bit of overhead.
 const bufSize = 128
@@ -187,12 +191,12 @@ func (txs *unorderedTxs) endTx(packetID uint16) (done chan<- error, topicFilters
 	return callback.done, callback.topicFilters
 }
 
-func (txs *unorderedTxs) close() {
+func (txs *unorderedTxs) breakAll() {
 	txs.Lock()
 	defer txs.Unlock()
 	for packetID, callback := range txs.perPacketID {
 		delete(txs.perPacketID, packetID)
-		callback.done <- ErrClosed
+		callback.done <- ErrBreak
 	}
 }
 
@@ -307,9 +311,7 @@ func (c *Client) onSUBACK() error {
 		return errProtoReset
 	}
 
-	if failN == 0 {
-		close(done)
-	} else {
+	if failN != 0 {
 		var err SubscribeError
 		for i, code := range returnCodes {
 			if code == 0x80 {
@@ -318,6 +320,7 @@ func (c *Client) onSUBACK() error {
 		}
 		done <- err
 	}
+	close(done)
 	return nil
 }
 
@@ -412,7 +415,7 @@ type holdup struct {
 // Publish delivers the message with an “at most once” guarantee.
 // Subscribers may or may not receive the message when subject to error.
 // This delivery method is the most efficient option.
-///
+//
 // Quit is optional, as nil just blocks. Appliance of quit will strictly result
 // in ErrCanceled.
 func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) error {
@@ -445,10 +448,9 @@ func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic str
 // This delivery method requires a response transmission plus persistence on
 // both client-side and broker-side.
 //
-// The acknowledge channel is closed uppon receival confirmation by the broker.
-// ErrClosed leaves the channel blocked (with no further input). A blocked send
-// from ReadSlices causes the error to be returned instead.
-func (c *Client) PublishAtLeastOnce(message []byte, topic string) (ack <-chan error, err error) {
+// The exchange channel is closed uppon receival confirmation by the broker.
+// ErrClosed leaves the channel blocked (with no further input).
+func (c *Client) PublishAtLeastOnce(message []byte, topic string) (exchange <-chan error, err error) {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
 	packet, err := appendPublishPacket(buf, message, topic, atLeastOnceIDSpace, typePUBLISH<<4|atLeastOnceLevel<<1)
@@ -463,7 +465,7 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string) (ack <-chan er
 // subscriptions match the topic name. When a new subscription is established,
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
-func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
+func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (exchange <-chan error, err error) {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
 	packet, err := appendPublishPacket(buf, message, topic, atLeastOnceIDSpace, typePUBLISH<<4|atLeastOnceLevel<<1|retainFlag)
@@ -476,7 +478,7 @@ func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (ack <
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
 // This delivery method eliminates the duplicate-delivery risk from
 // PublishAtLeastOnce at the expense of an additional network roundtrip.
-func (c *Client) PublishExactlyOnce(message []byte, topic string) (ack <-chan error, err error) {
+func (c *Client) PublishExactlyOnce(message []byte, topic string) (exchange <-chan error, err error) {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
 	packet, err := appendPublishPacket(buf, message, topic, exactlyOnceIDSpace, typePUBLISH<<4|exactlyOnceLevel<<1)
@@ -491,7 +493,7 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string) (ack <-chan er
 // subscriptions match the topic name. When a new subscription is established,
 // the last retained message, if any, on each matching topic name must be sent
 // to the subscriber.
-func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (ack <-chan error, err error) {
+func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (exchange <-chan error, err error) {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
 	packet, err := appendPublishPacket(buf, message, topic, exactlyOnceIDSpace, typePUBLISH<<4|exactlyOnceLevel<<1|retainFlag)
@@ -501,8 +503,8 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (ack <
 	return c.submitPersisted(packet, c.exactlyOnceSem, c.recQ, c.compQ, c.exactlyOnceBlock)
 }
 
-func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 chan chan<- error, block chan holdup) (ack <-chan error, err error) {
-	done := make(chan error, 2)
+func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 chan chan<- error, block chan holdup) (exchange <-chan error, err error) {
+	done := make(chan error, 2) // receives at most 1 write error + ErrClosed
 	select {
 	case counter, ok := <-sem:
 		if !ok {
@@ -519,12 +521,11 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, err
 		}
 		ackQ <- done // won't block due ErrMax check
-
 		switch err := c.writeAll(c.Offline(), packet); {
 		case err == nil:
 			sem <- counter + 1
-		case errors.Is(err, ErrCanceled):
-			done <- ErrDown
+		case errors.Is(err, ErrCanceled), errors.Is(err, ErrDown):
+			// don't report down
 			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		default:
 			done <- err
@@ -545,7 +546,6 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 		ackQ <- done // won't block due ErrMax check
 		holdup.UntilSeqNo++
 		block <- holdup
-		done <- ErrDown
 	}
 
 	return done, nil
@@ -553,14 +553,14 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 
 func appendPublishPacket(buf *[bufSize]byte, message []byte, topic string, packetID uint, head byte) (net.Buffers, error) {
 	if err := stringCheck(topic); err != nil {
-		return nil, fmt.Errorf("mqtt: PUBLISH denied due topic: %w", err)
+		return nil, fmt.Errorf("mqtt: PUBLISH request denied due topic: %w", err)
 	}
 	size := 2 + len(topic) + len(message)
 	if packetID != 0 {
 		size += 2
 	}
 	if size < 0 || size > packetMax {
-		return nil, fmt.Errorf("mqtt: PUBLISH denied: %w", errPacketMax)
+		return nil, fmt.Errorf("mqtt: PUBLISH request denied: %w", errPacketMax)
 	}
 
 	packet := append(buf[:0], head)
