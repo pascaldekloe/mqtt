@@ -60,7 +60,7 @@ var (
 	verboseFlag = flag.Bool("verbose", false, "Produces more output to "+italic+"standard error"+clear+" for debug purposes.")
 )
 
-func parseConfig() (clientID string, config *mqtt.Config, dialer mqtt.Dialer) {
+func parseConfig() (clientID string, config *mqtt.Config) {
 	var addr string
 	switch args := flag.Args(); {
 	case len(args) == 0:
@@ -100,11 +100,11 @@ func parseConfig() (clientID string, config *mqtt.Config, dialer mqtt.Dialer) {
 	}
 
 	if *tlsFlag {
-		dialer = mqtt.NewTLSDialer(*netFlag, addr, &tls.Config{
+		config.Dialer = mqtt.NewTLSDialer(*netFlag, addr, &tls.Config{
 			ServerName: *serverFlag,
 		})
 	} else {
-		dialer = mqtt.NewDialer(*netFlag, addr)
+		config.Dialer = mqtt.NewDialer(*netFlag, addr)
 	}
 	return
 }
@@ -136,9 +136,8 @@ func main() {
 		log.SetOutput(io.Discard)
 	}
 
-	clientID, config, dialer := parseConfig()
-	client := mqtt.NewClient(config, dialer)
-	err := client.VolatileSession(clientID)
+	clientID, config := parseConfig()
+	client, err := mqtt.VolatileSession(clientID, config)
 	if err != nil {
 		log.Fatal(err)
 	}

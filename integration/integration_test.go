@@ -51,13 +51,13 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	testMessage := []byte("Hello World!")
 	testTopic := fmt.Sprintf("test/race-%d", deliveryLevel)
 
-	client := mqtt.NewClient(&mqtt.Config{
+	client, err := mqtt.VolatileSession(t.Name(), &mqtt.Config{
+		Dialer:         mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")),
 		WireTimeout:    time.Second,
 		CleanSession:   true,
 		AtLeastOnceMax: testN,
 		ExactlyOnceMax: testN,
-	}, mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")))
-	err := client.VolatileSession(t.Name())
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,24 +115,24 @@ func race(t *testing.T, host string, deliveryLevel int) {
 	for i := 0; i < testN; i++ {
 		go func() {
 			defer wg.Done()
-			var ack <-chan error
+			var exchange <-chan error
 			<-launch
 			var err error
 			switch deliveryLevel {
 			case 0:
 				err = client.Publish(nil, testMessage, testTopic)
 			case 1:
-				ack, err = client.PublishAtLeastOnce(testMessage, testTopic)
+				exchange, err = client.PublishAtLeastOnce(testMessage, testTopic)
 			case 2:
-				ack, err = client.PublishExactlyOnce(testMessage, testTopic)
+				exchange, err = client.PublishExactlyOnce(testMessage, testTopic)
 			}
 			if err != nil {
 				t.Error("publish error:", err)
 				return
 			}
 			if deliveryLevel != 0 {
-				for err := range ack {
-					t.Error("publish error:", err)
+				for err := range exchange {
+					t.Error("publish exchange error:", err)
 					if errors.Is(err, mqtt.ErrClosed) {
 						break
 					}
