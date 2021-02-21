@@ -1,7 +1,7 @@
 version: "3"
 services:
   test:
-    image: golang:1.16-rc
+    image: golang:1.16
     volumes:
       - ..:/code
     command: /code/integration/docker.sh
