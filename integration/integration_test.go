@@ -17,15 +17,10 @@ import (
 
 var hosts = strings.Fields(os.Getenv("MQTT_HOSTS"))
 
-func TestMain(m *testing.M) {
-	if len(hosts) == 0 {
-		fmt.Println("integration tests skipped without MQTT_HOSTS environment variable")
-	} else {
-		os.Exit(m.Run())
-	}
-}
-
 func TestRace(t *testing.T) {
+	if len(hosts) == 0 {
+		t.Skip("no test targets without MQTT_HOSTS environment variable")
+	}
 	for i := range hosts {
 		t.Run(hosts[i], func(t *testing.T) {
 			host := hosts[i]
