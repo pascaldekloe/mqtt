@@ -137,7 +137,8 @@ func main() {
 	}
 
 	clientID, config := parseConfig()
-	client, err := mqtt.VolatileSession(clientID, config)
+	var err error
+	client, err = mqtt.VolatileSession(clientID, config)
 	if err != nil {
 		log.Fatal(err)
 	}
