@@ -106,8 +106,7 @@ func stringCheck(s string) error {
 func IsDeny(err error) bool {
 	for err != nil {
 		switch err {
-		case errPacketMax, errStringMax, errUTF8, errNull,
-			errNoDialer, errSubscribeNone, errUnsubscribeNone:
+		case errPacketMax, errStringMax, errUTF8, errNull, errSubscribeNone, errUnsubscribeNone:
 			return true
 		}
 		err = errors.Unwrap(err)

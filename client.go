@@ -122,11 +122,9 @@ type Config struct {
 	CleanSession bool
 }
 
-var errNoDialer = errors.New("mqtt: configuration has no dialer set")
-
 func (c *Config) valid() error {
 	if c.Dialer == nil {
-		return errNoDialer
+		return errors.New("mqtt: no Dialer in Config")
 	}
 	if err := stringCheck(c.UserName); err != nil {
 		return fmt.Errorf("mqtt: illegal user name: %w", err)
