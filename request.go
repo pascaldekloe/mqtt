@@ -228,7 +228,7 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	size := 2 + len(topicFilters)*3
 	for _, s := range topicFilters {
 		if err := stringCheck(s); err != nil {
-			return fmt.Errorf("mqtt: SUBSCRIBE request denied on topic filter: %s", err)
+			return fmt.Errorf("mqtt: SUBSCRIBE request denied on topic filter: %w", err)
 		}
 		size += len(s)
 	}
@@ -337,7 +337,7 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	for _, s := range topicFilters {
 		size += len(s)
 		if err := stringCheck(s); err != nil {
-			return fmt.Errorf("mqtt: UNSUBSCRIBE request denied on topic filter: %s", err)
+			return fmt.Errorf("mqtt: UNSUBSCRIBE request denied on topic filter: %w", err)
 		}
 	}
 	if size > packetMax {

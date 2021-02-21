@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -396,6 +397,66 @@ func TestBreak(t *testing.T) {
 	<-pingDone
 	<-subscribeDone
 	<-unsubscribeDone
+}
+
+func TestDeny(t *testing.T) {
+	// no invocation to the client allowed
+	client, _ := newClientPipe(t)
+
+	var err error
+	err = client.PublishRetained(nil, nil, "topic with \xED\xA0\x80 not allowed")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("publish with U+D800 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	_, err = client.PublishAtLeastOnceRetained(nil, "topic with \xED\xA0\x81 not allowed")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("publish with U+D801 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	_, err = client.PublishExactlyOnceRetained(nil, "topic with \xED\xBF\xBF not allowed")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("publish with U+DFFF in topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+
+	err = client.Subscribe(nil)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	err = client.SubscribeLimitAtMostOnce(nil, "null char \x00 not allowed")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with null character got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	err = client.SubscribeLimitAtLeastOnce(nil, "char \x80 breaks UTF-8")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with broken UTF-8 got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+
+	err = client.Unsubscribe(nil)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("unsubscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	tooBig := strings.Repeat("A", 1<<16)
+	err = client.Unsubscribe(nil, tooBig)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("unsubscribe with 64 KiB filter got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+
+	err = client.Publish(nil, make([]byte, 256*1024*1024), "")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("publish with 256 MiB got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	filtersTooBig := make([]string, 256*1024)
+	KiB := strings.Repeat("A", 1024)
+	for i := range filtersTooBig {
+		filtersTooBig[i] = KiB
+	}
+	err = client.Subscribe(nil, filtersTooBig...)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	err = client.Unsubscribe(nil, filtersTooBig...)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("unsubscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
 }
 
 func testAck(t *testing.T, ack <-chan error) {
