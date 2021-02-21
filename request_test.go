@@ -73,22 +73,6 @@ func TestPingReqTimeout(t *testing.T) {
 	<-brokerMockDone
 }
 
-func TestPingRespNone(t *testing.T) {
-	client, conn := newClientPipe(t)
-	brokerMockDone := testRoutine(t, func() {
-		wantPacketHex(t, conn, "c000") // PINGREQ
-		// leave without response
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
-	defer cancel()
-	err := client.Ping(ctx.Done())
-	if !errors.Is(err, mqtt.ErrAbandoned) {
-		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
-	}
-	<-brokerMockDone
-}
-
 func TestSubscribeMultiple(t *testing.T) {
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
@@ -131,22 +115,6 @@ func TestSubscribeReqTimeout(t *testing.T) {
 	<-brokerMockDone
 }
 
-func TestSubscribeRespNone(t *testing.T) {
-	client, conn := newClientPipe(t)
-	brokerMockDone := testRoutine(t, func() {
-		wantPacketHex(t, conn, "8206600000017802")
-		// leave without response
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
-	defer cancel()
-	err := client.Subscribe(ctx.Done(), "x")
-	if !errors.Is(err, mqtt.ErrAbandoned) {
-		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
-	}
-	<-brokerMockDone
-}
-
 func TestUnsubscribeMultiple(t *testing.T) {
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
@@ -183,22 +151,6 @@ func TestUnsubscribeReqTimeout(t *testing.T) {
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
-	}
-	<-brokerMockDone
-}
-
-func TestUnsubscribeRespNone(t *testing.T) {
-	client, conn := newClientPipe(t)
-	brokerMockDone := testRoutine(t, func() {
-		wantPacketHex(t, conn, "a2054000000178")
-		// leave without response
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*client.WireTimeout)
-	defer cancel()
-	err := client.Unsubscribe(ctx.Done(), "x")
-	if !errors.Is(err, mqtt.ErrAbandoned) {
-		t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
 	}
 	<-brokerMockDone
 }
@@ -373,6 +325,40 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 		}
 	}
 	<-brokerMockDone
+}
+
+func TestAbandon(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client, conn := newClientPipe(t)
+
+	pingDone := testRoutine(t, func() {
+		err := client.Ping(ctx.Done())
+		if !errors.Is(err, mqtt.ErrAbandoned) {
+			t.Errorf("ping got error %q [%T], want an mqtt.ErrAbandoned", err, err)
+		}
+	})
+	wantPacketHex(t, conn, "c000") // PINGREQ
+
+	subscribeDone := testRoutine(t, func() {
+		err := client.Subscribe(ctx.Done(), "x")
+		if !errors.Is(err, mqtt.ErrAbandoned) {
+			t.Errorf("got error %q [%T], want an mqtt.ErrAbandoned", err, err)
+		}
+	})
+	wantPacketHex(t, conn, "8206600000017802") // SUBSCRIBE
+
+	unsubscribeDone := testRoutine(t, func() {
+		err := client.Unsubscribe(ctx.Done(), "x")
+		if !errors.Is(err, mqtt.ErrAbandoned) {
+			t.Errorf("unsubscribe got error %q [%T], want an mqtt.ErrAbandoned", err, err)
+		}
+	})
+	wantPacketHex(t, conn, "a2054001000178") // UNSUBSCRIBE
+
+	cancel()
+	<-pingDone
+	<-subscribeDone
+	<-unsubscribeDone
 }
 
 func testAck(t *testing.T, ack <-chan error) {
