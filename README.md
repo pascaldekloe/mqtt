@@ -13,7 +13,7 @@ gift to the open-source community.
 This is free and unencumbered software released into the
 [public domain](https://creativecommons.org/publicdomain/zero/1.0).
 
-[![API Documentation](https://godoc.org/github.com/pascaldekloe/mqtt?status.svg)](https://godoc.org/github.com/pascaldekloe/mqtt)
+[![Go Reference](https://pkg.go.dev/badge/github.com/pascaldekloe/mqtt.svg)](https://pkg.go.dev/github.com/pascaldekloe/mqtt)
 [![Build Status](https://travis-ci.org/pascaldekloe/mqtt.svg?branch=master)](https://travis-ci.org/pascaldekloe/mqtt)
 
 
