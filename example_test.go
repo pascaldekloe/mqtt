@@ -27,7 +27,7 @@ var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
 var Online func() <-chan struct{}
 
 func init() {
-	PublishAtLeastOnce = mqtttest.NewPublishAckStub(nil)
+	PublishAtLeastOnce = mqtttest.NewPublishEnqueuedStub(nil)
 	Subscribe = mqtttest.NewSubscribeStub(nil)
 	Online = func() <-chan struct{} { return nil }
 }
