@@ -713,7 +713,7 @@ func InitSession(clientID string, p Persistence, c *Config) (*Client, error) {
 // be continued by using the same clientID again. Use CleanSession to prevent
 // reuse of an existing state.
 func VolatileSession(clientID string, c *Config) (*Client, error) {
-	return initSession(clientID, newVolatilePersistence(), c)
+	return initSession(clientID, newVolatile(), c)
 }
 
 func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
@@ -730,7 +730,7 @@ func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
 		return nil, err
 	}
 	if len(keys) != 0 {
-		return nil, errors.New("mqtt: persistence not empty")
+		return nil, errors.New("mqtt: init on non-empty persistence")
 	}
 
 	// install
@@ -742,8 +742,7 @@ func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
 	return newClient(p, c), nil
 }
 
-// AdoptSession continues the session with a Persistence which had an
-// InitSession already (on another Client).
+// AdoptSession continues with a Persistence which had an InitSession already.
 func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal error) {
 	if err := c.valid(); err != nil {
 		return nil, warn, err
@@ -753,6 +752,8 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	if err != nil {
 		return nil, warn, err
 	}
+
+	// collect local packet identifiers
 	seqNos := make(seqNos, len(keys))
 	keyPerSeqNo := make(map[uint64]uint, len(keys))
 	PUBRELPerKey := make(map[uint][]byte)
@@ -769,17 +770,17 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		case !ok:
 			err := p.Delete(key)
 			if err != nil {
-				warn = append(warn, fmt.Errorf("mqtt: corrupt record %d not deleted: %s", key, err))
+				warn = append(warn, fmt.Errorf("mqtt: corrupt persistence record %#x not deleted: %w", key, err))
 			} else {
-				warn = append(warn, fmt.Errorf("mqtt: corrupt record %d deleted", key))
+				warn = append(warn, fmt.Errorf("mqtt: corrupt persistence record %#x deleted", key))
 			}
 
 		case len(packet) == 0:
 			err := p.Delete(key)
 			if err != nil {
-				warn = append(warn, fmt.Errorf("mqtt: somehow empty record %d not deleted: %s", key, err))
+				warn = append(warn, fmt.Errorf("mqtt: somehow empty persistence record %#x not deleted: %w", key, err))
 			} else {
-				warn = append(warn, fmt.Errorf("mqtt: somehow empty record %d deleted", key))
+				warn = append(warn, fmt.Errorf("mqtt: somehow empty persistence record %#x deleted", key))
 			}
 
 		default:
@@ -794,16 +795,23 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	var atLeastOnceKeys, exactlyOnceKeys []uint
 	sort.Sort(seqNos)
 	for _, seqNo := range seqNos {
-		switch seqNo &^ publishIDMask {
+		key := keyPerSeqNo[seqNo]
+		switch key &^ publishIDMask {
 		case atLeastOnceIDSpace:
-			atLeastOnceKeys = append(atLeastOnceKeys, keyPerSeqNo[seqNo])
+			atLeastOnceKeys = append(atLeastOnceKeys, key)
 		case exactlyOnceIDSpace:
-			exactlyOnceKeys = append(exactlyOnceKeys, keyPerSeqNo[seqNo])
+			exactlyOnceKeys = append(exactlyOnceKeys, key)
 		}
 	}
 	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", p, &warn)
 	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", p, &warn)
 
+	switch {
+	case len(atLeastOnceKeys) > c.AtLeastOnceMax:
+		return nil, warn, fmt.Errorf("mqtt: %d AtLeastOnceMax is less than %d pending from Persistence", c.AtLeastOnceMax, len(atLeastOnceKeys))
+	case len(exactlyOnceKeys) > c.ExactlyOnceMax:
+		return nil, warn, fmt.Errorf("mqtt: %d ExactlyOnceMax is less than %d pending from Persistence", c.ExactlyOnceMax, len(exactlyOnceKeys))
+	}
 	client = newClient(&ruggedPersistence{Persistence: p}, c)
 
 	// “When a Client reconnects with CleanSession set to 0, both the Client
@@ -812,8 +820,8 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	// — MQTT Version 3.1.1, conformance statement MQTT-4.4.0-1
 
 	if len(atLeastOnceKeys) != 0 {
-		for n := 0; n < len(atLeastOnceKeys); n++ {
-			client.ackQ <- nil
+		for range atLeastOnceKeys {
+			client.ackQ <- make(chan<- error, 1) // won't block due Max check above
 		}
 		<-client.atLeastOnceSem
 		client.atLeastOnceBlock <- holdup{
@@ -822,33 +830,33 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		}
 	}
 
-	releaseOffset := len(exactlyOnceKeys)
-	for releaseOffset > 0 {
-		_, ok := PUBRELPerKey[exactlyOnceKeys[releaseOffset-1]]
-		if !ok {
-			break
+	if len(exactlyOnceKeys) != 0 {
+		var pubN int
+		for i, key := range exactlyOnceKeys {
+			packet, ok := PUBRELPerKey[key]
+			if !ok {
+				pubN = len(exactlyOnceKeys) - i
+				break
+			}
+			// send all those 4-byte packets in one goal
+			client.pendingAck = append(client.pendingAck, packet...)
+			client.compQ <- make(chan<- error, 1) // won't block due Max check above
 		}
-		releaseOffset--
-	}
-	for _, key := range exactlyOnceKeys[releaseOffset:] {
-		client.pendingAck = append(client.pendingAck, PUBRELPerKey[key]...)
-		client.compQ <- nil
-	}
-	if releaseOffset > 0 {
 		<-client.exactlyOnceSem
-		client.exactlyOnceBlock <- holdup{
-			SinceSeqNo: exactlyOnceKeys[0],
-			UntilSeqNo: exactlyOnceKeys[releaseOffset-1],
+		if pubN == 0 {
+			client.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
+		} else {
+			client.exactlyOnceBlock <- holdup{
+				SinceSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-pubN],
+				UntilSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-1],
+			}
 		}
-	} else if len(exactlyOnceKeys) != 0 {
-		<-client.exactlyOnceSem
-		client.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
 	}
 
 	return client, warn, nil
 }
 
-// SeqNos contains ruggedPersistence sequence numbers.
+// SeqNos sorts ruggedPersistence sequence numbers chronologicaly.
 type seqNos []uint64
 
 // Len implements sort.Interface.
@@ -860,7 +868,7 @@ func (a seqNos) Less(i, j int) bool { return a[i] < a[j] }
 // Swap implements sort.Interface.
 func (a seqNos) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
-// CleanSeq returs the last uninterrupted sequence from keys.
+// CleanSeq returns the last uninterrupted sequence from keys.
 func cleanSeq(keys []uint, name string, p Persistence, warn *[]error) (cleanKeys []uint) {
 	for len(keys) != 0 {
 		last := keys[0]
@@ -875,11 +883,11 @@ func cleanSeq(keys []uint, name string, p Persistence, warn *[]error) (cleanKeys
 				continue // correct followup
 			}
 
-			*warn = append(*warn, fmt.Errorf("mqtt: %s persistence keys %#x–%#x lost due gap until %#x, caused by delete or safe failure", name, keys[0], last, key))
+			*warn = append(*warn, fmt.Errorf("mqtt: %s persistence records %#x–%#x lost due gap until %#x, caused by delete or save failure", name, keys[0], last, key))
 			for _, key := range keys[:i] {
 				err := p.Delete(key)
 				if err != nil {
-					*warn = append(*warn, fmt.Errorf("mqtt: persistence key %#v left as is: %w", key, err))
+					*warn = append(*warn, fmt.Errorf("mqtt: persistence record %#v not deleted: %w", key, err))
 				}
 			}
 			keys = keys[i:]

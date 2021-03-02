@@ -47,7 +47,7 @@ const (
 	retainFlag = 0b0001 // store for future subscribers
 )
 
-// Packets without payload are kept static.
+// Some packet types do not carry any payload.
 var (
 	packetDISCONNECT = []byte{typeDISCONNECT << 4, 0}
 	packetPINGREQ    = []byte{typePINGREQ << 4, 0}
@@ -60,7 +60,7 @@ const (
 
 	// “Unless stated otherwise all UTF-8 encoded strings can have any
 	// length in the range 0 to 65535 bytes.”
-	// — MQTT Version 3.1.1, section 1.5.3
+	// — MQTT Version 3.1.1, subsection 1.5.3
 	stringMax = 1<<16 - 1 // 16-bit size prefixes
 )
 
@@ -100,7 +100,7 @@ func stringCheck(s string) error {
 }
 
 // IsDeny returns whether execution was rejected by the Client based on some
-// validation constraint, like size limitations or an illegal UTF-8 encoding.
+// validation constraint, like size limitation or an illegal UTF-8 encoding.
 // The rejection is permanent in such case. Another invocation with the same
 // arguments will result in the same error again.
 func IsDeny(err error) bool {
@@ -114,7 +114,7 @@ func IsDeny(err error) bool {
 	return false
 }
 
-// ConnectReturn is the response code CONNACK.
+// ConnectReturn is the response code from CONNACK.
 type connectReturn byte
 
 // Connect return errors are predefined reasons for a broker to deny a session.
@@ -181,7 +181,6 @@ const (
 	remoteIDKeyFlag = 1 << 16
 
 	// Packet identifier zero is not in use by the protocol.
-	// The lookup during CONNECT prevents starts with a broken persistence.
 	clientIDKey = 0
 )
 
@@ -199,7 +198,8 @@ type Persistence interface {
 	// Save defines the value of a key.
 	Save(key uint, value net.Buffers) error
 
-	// Delete clears the value of a key, whether it existed or not.
+	// Delete clears the value of a key, whether it existed or not. Failures
+	// will be overwitten eventually due to the limited address space.
 	Delete(key uint) error
 
 	// List enumerates all available in any order.
@@ -212,7 +212,7 @@ type volatile struct {
 	perKey map[uint][]byte
 }
 
-func newVolatilePersistence() Persistence {
+func newVolatile() Persistence {
 	return &volatile{perKey: make(map[uint][]byte)}
 }
 
@@ -268,6 +268,7 @@ type ruggedPersistence struct {
 	seqNo uint64
 }
 
+// Load implements the Persistence interface.
 func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
 	value, err := r.Persistence.Load(key)
 	if err != nil {
@@ -283,6 +284,7 @@ func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
 	return value, nil
 }
 
+// Save implements the Persistence interface.
 func (rugged *ruggedPersistence) Save(key uint, value net.Buffers) error {
 	return rugged.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&rugged.seqNo, 1)))
 }
