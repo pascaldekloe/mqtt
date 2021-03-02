@@ -20,11 +20,11 @@ var ErrMax = errors.New("mqtt: maximum number of pending requests reached")
 var ErrCanceled = errors.New("mqtt: request canceled before submission")
 
 // ErrAbandoned means that a quit signal got applied after the request was send.
-// The broker received the request, yet the result/reponse remains unkown.
+// The broker received the request, yet the result/response remains unknown.
 var ErrAbandoned = errors.New("mqtt: request abandoned after submission")
 
 // ErrBreak means that the connection broke up after the request was send.
-// The broker received the request, yet the result/reponse remains unkown.
+// The broker received the request, yet the result/response remains unknown.
 var ErrBreak = errors.New("mqtt: connection lost while awaiting response")
 
 // BufSize should fit topic names with a bit of overhead.

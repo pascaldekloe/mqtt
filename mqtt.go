@@ -381,8 +381,8 @@ func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
 }
 
 // Save implements the Persistence interface.
-func (rugged *ruggedPersistence) Save(key uint, value net.Buffers) error {
-	return rugged.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&rugged.seqNo, 1)))
+func (r *ruggedPersistence) Save(key uint, value net.Buffers) error {
+	return r.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&rugged.seqNo, 1)))
 }
 
 var checkTable = crc32.MakeTable(crc32.Castagnoli)

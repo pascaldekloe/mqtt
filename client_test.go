@@ -20,7 +20,7 @@ import (
 const newClientCONNECTHex = "100c00044d515454040000000000"
 
 // NewClient returns a new client with a Dialer which returns conns in order of
-// appearence.
+// appearance.
 func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.Client {
 	// This type of test is slow in general.
 	t.Parallel()
@@ -142,7 +142,7 @@ func TestClose(t *testing.T) {
 	online := client.Online()
 	select {
 	case <-online:
-		t.Error("online signal receive on intial state")
+		t.Error("online signal receive on initial state")
 	default:
 		break
 	}
@@ -151,7 +151,7 @@ func TestClose(t *testing.T) {
 	case <-offline:
 		break
 	default:
-		t.Error("offline signal blocked on intial state")
+		t.Error("offline signal blocked on initial state")
 	}
 
 	// Close before ReadSlices (connects). Race because we can. ™️
