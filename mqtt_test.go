@@ -50,6 +50,9 @@ func TestPesistenceEmpty(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
 		testPersistenceEmpty(t, newVolatile())
 	})
+	t.Run("fileSystem", func(t *testing.T) {
+		testPersistenceEmpty(t, FileSystem(t.TempDir()))
+	})
 }
 
 func testPersistenceEmpty(t *testing.T, p Persistence) {
@@ -73,6 +76,9 @@ func testPersistenceEmpty(t *testing.T, p Persistence) {
 func TestPersistence(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
 		testPersistence(t, newVolatile())
+	})
+	t.Run("fileSystem", func(t *testing.T) {
+		testPersistence(t, FileSystem(t.TempDir()))
 	})
 }
 
@@ -127,6 +133,9 @@ func TestPersistenceUpdate(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
 		testPersistenceUpdate(t, newVolatile())
 	})
+	t.Run("fileSystem", func(t *testing.T) {
+		testPersistenceUpdate(t, FileSystem(t.TempDir()))
+	})
 }
 
 func testPersistenceUpdate(t *testing.T, p Persistence) {
@@ -162,6 +171,9 @@ func testPersistenceUpdate(t *testing.T, p Persistence) {
 func TestPersistenceDelete(t *testing.T) {
 	t.Run("volatile", func(t *testing.T) {
 		testPersistenceDelete(t, newVolatile())
+	})
+	t.Run("fileSystem", func(t *testing.T) {
+		testPersistenceDelete(t, FileSystem(t.TempDir()))
 	})
 }
 

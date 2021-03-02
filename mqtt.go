@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -256,6 +258,100 @@ func (m *volatile) List() (keys []uint, err error) {
 	keys = make([]uint, 0, len(m.perKey))
 	for k := range m.perKey {
 		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+type fileSystem string
+
+// FileSystem stores values per file in a directory.
+func FileSystem(dir string) Persistence {
+	if dir == "" || dir[len(dir)-1] != os.PathSeparator {
+		dir += string([]rune{os.PathSeparator})
+	}
+	return fileSystem(dir)
+}
+
+func (dir fileSystem) file(key uint) string {
+	return fmt.Sprintf("%s%05x", dir, key)
+}
+
+func (dir fileSystem) spoolFile(key uint) string {
+	return fmt.Sprintf("%s%05x.spool", dir, key)
+}
+
+// Load implements the Persistence interface.
+func (dir fileSystem) Load(key uint) ([]byte, error) {
+	value, err := os.ReadFile(dir.file(key))
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return value, err
+}
+
+// Save implements the Persistence interface.
+func (dir fileSystem) Save(key uint, value net.Buffers) error {
+	f, err := os.Create(dir.spoolFile(key))
+	if err != nil {
+		return err
+	}
+	// ⚠️ inverse error checks
+	_, err = value.WriteTo(f)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if closeErr != nil {
+		if err == nil {
+			err = closeErr
+		} else {
+			err = fmt.Errorf("%w; file descriptor leak: %s", err, closeErr)
+		}
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), dir.file(key))
+	}
+	if err == nil {
+		return nil // OK
+	}
+	removeErr := os.Remove(f.Name())
+	if removeErr != nil {
+		err = fmt.Errorf("%w; file leak: %s", err, removeErr)
+	}
+	return err
+}
+
+// Delete implements the Persistence interface.
+func (dir fileSystem) Delete(key uint) error {
+	err := os.Remove(dir.file(key))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// List implements the Persistence interface.
+func (dir fileSystem) List() (keys []uint, err error) {
+	f, err := os.Open(string(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(0)
+	if err != nil {
+		return nil, err
+	}
+
+	keys = make([]uint, 0, len(names))
+	for _, name := range names {
+		if len(name) != 5 {
+			continue
+		}
+		u, err := strconv.ParseUint(name, 16, 17)
+		if err != nil {
+			continue
+		}
+		keys = append(keys, uint(u))
 	}
 	return keys, nil
 }
