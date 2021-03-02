@@ -26,7 +26,7 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 	t.Parallel()
 
 	timeoutDone := make(chan struct{})
-	timeout := time.AfterFunc(time.Second, func() {
+	timeout := time.AfterFunc(2*time.Second, func() {
 		defer close(timeoutDone)
 		t.Error("test timeout; closing connections…")
 		for _, conn := range conns {
