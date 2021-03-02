@@ -363,7 +363,7 @@ func TestAbandon(t *testing.T) {
 }
 
 func TestBreak(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	client, conns := newClientPipeN(t, 2, mqtttest.Transfer{Err: io.EOF})
 
@@ -460,7 +460,7 @@ func TestDeny(t *testing.T) {
 }
 
 func testAck(t *testing.T, ack <-chan error) {
-	timeout := time.NewTimer(time.Second)
+	timeout := time.NewTimer(2 * time.Second)
 	defer timeout.Stop()
 
 	for {
