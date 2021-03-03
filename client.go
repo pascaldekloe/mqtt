@@ -371,7 +371,6 @@ func (c *Client) Close() error {
 	case ErrClosed:
 		return nil
 	}
-	c.termCallbacks()
 	return err
 }
 
@@ -389,7 +388,6 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 	if err == ErrClosed {
 		return ErrClosed
 	}
-	c.termCallbacks()
 	if err != nil {
 		return fmt.Errorf("mqtt: DISCONNECT not send: %w", err)
 	}
@@ -411,14 +409,15 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if c.persistence == nil {
-			return // not initialized
-		}
 		select {
-		case <-c.atLeastOnceSem:
+		case _, ok := <-c.atLeastOnceSem:
+			if !ok { // already terminated
+				return
+			}
 		case <-c.atLeastOnceBlock:
 		}
 		close(c.atLeastOnceSem) // terminate
+
 		// flush queue
 		close(c.ackQ)
 		for ch := range c.ackQ {
@@ -432,14 +431,15 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if c.persistence == nil {
-			return // not initialized
-		}
 		select {
-		case <-c.exactlyOnceSem:
+		case _, ok := <-c.exactlyOnceSem:
+			if !ok { // already terminated
+				return
+			}
 		case <-c.exactlyOnceBlock:
 		}
 		close(c.exactlyOnceSem) // terminate
+
 		// flush queues
 		close(c.recQ)
 		for ch := range c.recQ {
@@ -457,19 +457,17 @@ func (c *Client) termCallbacks() {
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		c.unorderedTxs.breakAll()
-	}()
-
 	select {
-	case ack := <-c.pingAck:
-		ack <- ErrBreak
+	case ack, ok := <-c.pingAck:
+		if ok {
+			ack <- ErrBreak
+		}
 	default:
 		break
 	}
 	wg.Wait()
+
+	c.unorderedTxs.breakAll()
 }
 
 // Online returns a chanel that's closed when the client has a connection.
@@ -959,6 +957,17 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 // once down. Retries on IsConnectionRefused, if any, should probably apply a
 // rather large backoff. See the Client example for a complete setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
+	message, topic, err = c.readSlices()
+	switch {
+	case err == c.bigMessage: // either nil or BigMessage
+		break
+	case errors.Is(err, ErrClosed):
+		c.termCallbacks()
+	}
+	return
+}
+
+func (c *Client) readSlices() (message, topic []byte, err error) {
 	// A pending BigMessage implies that the connection was functional on
 	// the last return.
 	switch {

@@ -14,31 +14,6 @@ import (
 	"github.com/pascaldekloe/mqtt/mqtttest"
 )
 
-// NewClientPipe returns a client which is connected to a pipe.
-func newClientPipe(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.Conn) {
-	clientEnd, brokerEnd := net.Pipe()
-	client := newClient(t, []net.Conn{clientEnd}, want...)
-
-	wantPacketHex(t, brokerEnd, newClientCONNECTHex)
-	sendPacketHex(t, brokerEnd, "20020000") // CONNACK
-
-	return client, brokerEnd
-}
-
-func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Client, []net.Conn) {
-	clientConns := make([]net.Conn, n)
-	brokerConns := make([]net.Conn, n)
-	for i := range clientConns {
-		clientConns[i], brokerConns[i] = net.Pipe()
-	}
-	client := newClient(t, clientConns, want...)
-
-	wantPacketHex(t, brokerConns[0], newClientCONNECTHex)
-	sendPacketHex(t, brokerConns[0], "20020000") // CONNACK
-
-	return client, brokerConns
-}
-
 func TestPing(t *testing.T) {
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
@@ -257,7 +232,7 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 			t.Fatal("broker got error on first connection close:", err)
 		}
 
-		wantPacketHex(t, conns[1], newClientCONNECTHex)
+		wantPacketHex(t, conns[1], pipeCONNECTHex)
 		sendPacketHex(t, conns[1], "20020000") // CONNACK
 		wantPacketHex(t, conns[1], hex.EncodeToString([]byte{
 			0x3a, 6, // with duplicate [DUP] flag
@@ -273,6 +248,96 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 	}
 	testAck(t, ack)
 	<-brokerMockDone
+}
+
+func TestPublishAtLeastOnceRestart(t *testing.T) {
+	t.Parallel()
+
+	p := mqtt.FileSystem(t.TempDir())
+
+	clientConn, brokerConn := net.Pipe()
+	client, err := mqtt.InitSession("test-client", p, &mqtt.Config{
+		WireTimeout:    time.Second / 4,
+		AtLeastOnceMax: 3,
+		Dialer:         newTestDialer(t, clientConn),
+	})
+	if err != nil {
+		t.Fatal("InitSession error:", err)
+	}
+	testClient(t, client)
+	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
+	sendPacketHex(t, brokerConn, "20020000") // CONNACK
+
+	brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
+			0x32, 5, 0, 0,
+			0x80, 0x00, // 1st packet identifier
+			'1'}))
+		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
+			0x32, 5, 0, 0,
+			0x80, 0x01, // 2nd packet identifier
+			'2'}))
+
+		sendPacketHex(t, brokerConn, "40028000") // SUBACK 1st
+
+		var buf [1]byte
+		switch _, err := io.ReadFull(brokerConn, buf[:]); {
+		case err != nil:
+			t.Error("broker read error:", err)
+		case buf[0] != 0x32:
+			t.Errorf("want PUBLISH head 0x32, got %#x", buf[0])
+		}
+		// leave 3rd partial read
+
+		err := client.Close()
+		if err != nil {
+			t.Error("Close error:", err)
+		}
+	})
+
+	ack1, err := client.PublishAtLeastOnce([]byte{'1'}, "")
+	if err != nil {
+		t.Errorf("publish #1 got error %q [%T]", err, err)
+	}
+	ack2, err := client.PublishAtLeastOnce([]byte{'2'}, "")
+	if err != nil {
+		t.Errorf("publish #2 got error %q [%T]", err, err)
+	}
+	ack3, err := client.PublishAtLeastOnce([]byte{'3'}, "")
+	if err != nil {
+		t.Errorf("publish #3 got error %q [%T]", err, err)
+	}
+	<-brokerMockDone
+	testAck(t, ack1)
+	testAckClosed(t, ack2)
+	testAckClosed(t, ack3)
+
+	// continue with another Client
+	clientConn, brokerConn = net.Pipe()
+	client, warn, err := mqtt.AdoptSession(p, &mqtt.Config{
+		WireTimeout:    time.Second / 4,
+		AtLeastOnceMax: 3,
+		Dialer:         newTestDialer(t, clientConn),
+	})
+	if err != nil {
+		t.Fatal("AdoptSession error:", err)
+	}
+	for _, err := range warn {
+		t.Error("AdoptSession warning:", err)
+	}
+	testClient(t, client)
+	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
+	sendPacketHex(t, brokerConn, "20020000") // CONNACK
+	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
+		0x3a, 5, 0, 0, // with duplicate [DUP] flag
+		0x80, 0x01, // 2nd packet identifier
+		'2'}))
+	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
+		0x3a, 5, 0, 0, // with duplicate [DUP] flag
+		0x80, 0x02, // 3rd packet identifier
+		'3'}))
+	sendPacketHex(t, brokerConn, "40028001") // SUBACK 2nd
+	sendPacketHex(t, brokerConn, "40028002") // SUBACK 3rd
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
@@ -460,18 +525,32 @@ func TestDeny(t *testing.T) {
 }
 
 func testAck(t *testing.T, ack <-chan error) {
+	t.Helper()
 	timeout := time.NewTimer(2 * time.Second)
 	defer timeout.Stop()
 
-	for {
-		select {
-		case <-timeout.C:
-			t.Fatal("ack read timeout")
+	select {
+	case <-timeout.C:
+		t.Fatal("ack read timeout")
 
-		case err, ok := <-ack:
-			if !ok {
-				return
-			}
+	case err, ok := <-ack:
+		if ok {
+			t.Errorf("ack got error %q [%T]", err, err)
+		}
+	}
+}
+
+func testAckClosed(t *testing.T, ack <-chan error) {
+	t.Helper()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case <-timeout.C:
+		t.Fatal("ack read timeout")
+
+	case err := <-ack:
+		if !errors.Is(err, mqtt.ErrClosed) {
 			t.Errorf("ack got error %q [%T]", err, err)
 		}
 	}

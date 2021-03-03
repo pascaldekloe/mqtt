@@ -754,7 +754,7 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	}
 
 	// collect local packet identifiers
-	seqNos := make(seqNos, len(keys))
+	seqNos := make(seqNos, 0, len(keys))
 	keyPerSeqNo := make(map[uint64]uint, len(keys))
 	PUBRELPerKey := make(map[uint][]byte)
 	for _, key := range keys {
@@ -820,6 +820,7 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	// — MQTT Version 3.1.1, conformance statement MQTT-4.4.0-1
 
 	if len(atLeastOnceKeys) != 0 {
+		client.orderedTxs.Acked = atLeastOnceKeys[0] & publishIDMask
 		for range atLeastOnceKeys {
 			client.ackQ <- make(chan<- error, 1) // won't block due Max check above
 		}
@@ -831,16 +832,21 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	}
 
 	if len(exactlyOnceKeys) != 0 {
+		client.orderedTxs.Completed = exactlyOnceKeys[0] & publishIDMask
 		var pubN int
 		for i, key := range exactlyOnceKeys {
 			packet, ok := PUBRELPerKey[key]
 			if !ok {
 				pubN = len(exactlyOnceKeys) - i
+				client.orderedTxs.Received = key & publishIDMask
 				break
 			}
 			// send all those 4-byte packets in one goal
 			client.pendingAck = append(client.pendingAck, packet...)
 			client.compQ <- make(chan<- error, 1) // won't block due Max check above
+		}
+		if client.orderedTxs.Received == 0 {
+			client.orderedTxs.Received = exactlyOnceKeys[len(exactlyOnceKeys)-1]&publishIDMask + 1
 		}
 		<-client.exactlyOnceSem
 		if pubN == 0 {

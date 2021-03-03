@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,43 +17,17 @@ import (
 	"github.com/pascaldekloe/mqtt/mqtttest"
 )
 
-// NewClientCONNECTHex is the initial packet send to conns of a newClient.
-const newClientCONNECTHex = "100c00044d515454040000000000"
-
-// NewClient returns a new client with a Dialer which returns conns in order of
-// appearance.
-func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.Client {
-	// This type of test is slow in general.
-	t.Parallel()
-
+// TestClient reads the client with assertions and timeouts.
+func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 	timeoutDone := make(chan struct{})
 	timeout := time.AfterFunc(2*time.Second, func() {
 		defer close(timeoutDone)
-		t.Error("test timeout; closing connections…")
-		for _, conn := range conns {
-			conn.Close()
+		t.Error("test timeout; closing Client now…")
+		err := client.Close()
+		if err != nil {
+			t.Error("Close error:", err)
 		}
 	})
-
-	var dialN int
-	client, err := mqtt.VolatileSession("", &mqtt.Config{
-		WireTimeout:    time.Second / 4,
-		AtLeastOnceMax: 2,
-		ExactlyOnceMax: 2,
-		Dialer: func(context.Context) (net.Conn, error) {
-			dialN++
-			t.Log("Dial #", dialN)
-			if dialN > len(conns) {
-				block, _ := net.Pipe()
-				time.Sleep(time.Second / 16)
-				return block, nil
-			}
-			return conns[dialN-1], nil
-		},
-	})
-	if err != nil {
-		t.Fatal("volatile session error:", err)
-	}
 
 	readRoutineDone := testRoutine(t, func() {
 		defer func() {
@@ -124,8 +99,73 @@ func newClient(t *testing.T, conns []net.Conn, want ...mqtttest.Transfer) *mqtt.
 			t.Error("offline signal blocked after client close")
 		}
 	})
+}
 
-	return client
+// PipeCONNECTHex is the initial packet send to conns from a ClientPipe.
+const pipeCONNECTHex = "100c00044d515454040000000000"
+
+// NewClientPipe returns a new Client which is connected to a pipe.
+func newClientPipe(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.Conn) {
+	client, conns := newClientPipeN(t, 1, want...)
+	return client, conns[0]
+}
+
+// NewClientPipeN returns a new Client with n piped connections. The client is
+// connected to the first pipe. Reconnects get the remaining pipes in order of
+// appearance. The test fails on fewer connects than n.
+func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Client, []net.Conn) {
+	// This type of test is slow in general.
+	t.Parallel()
+
+	clientConns := make([]net.Conn, n)
+	brokerConns := make([]net.Conn, n)
+	for i := range clientConns {
+		clientConns[i], brokerConns[i] = net.Pipe()
+	}
+
+	client, err := mqtt.VolatileSession("", &mqtt.Config{
+		WireTimeout:    time.Second / 4,
+		AtLeastOnceMax: 2,
+		ExactlyOnceMax: 2,
+		Dialer:         newTestDialer(t, clientConns...),
+	})
+	if err != nil {
+		t.Fatal("volatile session error:", err)
+	}
+
+	testClient(t, client, want...)
+
+	wantPacketHex(t, brokerConns[0], pipeCONNECTHex)
+	sendPacketHex(t, brokerConns[0], "20020000") // CONNACK
+
+	return client, brokerConns
+}
+
+// NewTestDialer returns a new dialer which returns the conns in order of
+// appearance. The test fails on fewer dials.
+func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
+	t.Helper()
+
+	var dialN uint64
+
+	t.Cleanup(func() {
+		n := atomic.LoadUint64(&dialN)
+		if n < uint64(len(conns)) && !t.Failed() {
+			t.Errorf("got only %d Dialer invocations for %d connection mocks", n, len(conns))
+		}
+	})
+
+	return func(context.Context) (net.Conn, error) {
+		n := atomic.AddUint64(&dialN, 1)
+		t.Log("Dial #", n)
+		if n > uint64(len(conns)) {
+			// send a blocking connection with some delay
+			block, _ := net.Pipe()
+			time.Sleep(time.Second / 16)
+			return block, nil
+		}
+		return conns[n-1], nil
+	}
 }
 
 func TestClose(t *testing.T) {
@@ -167,6 +207,11 @@ func TestClose(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
+	_, _, err = client.ReadSlices()
+	if !errors.Is(err, mqtt.ErrClosed) {
+		t.Fatalf("ReadSlices got error %q, want an ErrClosed", err)
+	}
 
 	// Run twice to ensure the semaphores ain't leaking.
 	for roundN := 1; roundN <= 2; roundN++ {
@@ -251,7 +296,7 @@ func TestDown(t *testing.T) {
 	}
 
 	brokerMockDone := testRoutine(t, func() {
-		wantPacketHex(t, brokerEnd, newClientCONNECTHex)
+		wantPacketHex(t, brokerEnd, pipeCONNECTHex)
 		sendPacketHex(t, brokerEnd, "20020003")
 	})
 
