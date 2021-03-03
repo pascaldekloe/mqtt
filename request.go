@@ -425,7 +425,7 @@ func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) err
 	if err != nil {
 		return err
 	}
-	return c.writeAll(quit, packet)
+	return c.writeBuffers(quit, packet)
 }
 
 // PublishRetained is like Publish, but the broker should store the message, so
@@ -440,7 +440,7 @@ func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic str
 	if err != nil {
 		return err
 	}
-	return c.writeAll(quit, packet)
+	return c.writeBuffers(quit, packet)
 }
 
 // PublishAtLeastOnce delivers the message with an “at least once” guarantee.
@@ -521,7 +521,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			return nil, err
 		}
 		ackQ <- done // won't block due ErrMax check
-		switch err := c.writeAll(c.Offline(), packet); {
+		switch err := c.writeBuffers(c.Offline(), packet); {
 		case err == nil:
 			sem <- counter + 1
 		case errors.Is(err, ErrCanceled), errors.Is(err, ErrDown):

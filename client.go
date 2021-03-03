@@ -320,7 +320,7 @@ func newClient(p Persistence, config *Config) *Client {
 	return c
 }
 
-// TermConn hijacks connection access. Further connect, write and writeAll
+// TermConn hijacks connection access. Further connect, write and writeBuffers
 // requests are denied with ErrClosed, regardless of the error return.
 func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
 	// terminate connection control
@@ -366,10 +366,8 @@ func (c *Client) Close() error {
 	switch err {
 	case nil:
 		err = conn.Close()
-	case ErrCanceled, ErrDown:
+	case ErrCanceled, ErrDown, ErrClosed:
 		err = nil
-	case ErrClosed:
-		return nil
 	}
 	return err
 }
@@ -559,7 +557,7 @@ func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 	}
 }
 
-// Write submits the packet. Keep synchronised with writeAll!
+// Write submits the packet. Keep synchronised with writeBuffers!
 func (c *Client) write(quit <-chan struct{}, p []byte) error {
 	for {
 		conn, err := c.lockWrite(quit)
@@ -584,15 +582,15 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 	}
 }
 
-// WriteAll submits the packet. Keep synchronised with write!
-func (c *Client) writeAll(quit <-chan struct{}, p net.Buffers) error {
+// WriteBuffers submits the packet. Keep synchronised with write!
+func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 	for {
 		conn, err := c.lockWrite(quit)
 		if err != nil {
 			return err
 		}
 
-		switch err := writeAll(conn, p, c.WireTimeout); {
+		switch err := writeBuffers(conn, p, c.WireTimeout); {
 		case err == nil:
 			c.writeSem <- conn // unlocks writes
 			return nil
@@ -609,7 +607,7 @@ func (c *Client) writeAll(quit <-chan struct{}, p net.Buffers) error {
 	}
 }
 
-// Write submits the packet. Keep synchronised with writeAll!
+// Write submits the packet. Keep synchronised with writeBuffers!
 func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 	if idleTimeout != 0 {
 		// Abandon timer to prevent waking up the system for no good reason.
@@ -638,8 +636,8 @@ func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 	}
 }
 
-// WriteAll submits the packet. Keep synchronised with write!
-func writeAll(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error {
+// WriteBuffers submits the packet. Keep synchronised with write!
+func writeBuffers(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error {
 	if idleTimeout != 0 {
 		// Abandon timer to prevent waking up the system for no good reason.
 		// https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/MinimizeTimerUse.html
