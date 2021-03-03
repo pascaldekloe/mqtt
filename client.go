@@ -269,8 +269,6 @@ type Client struct {
 
 	// The read routine sends its content as soon as possible.
 	pendingAck []byte
-	// The read routine applies this reusable buffer to pendingAck.
-	readBuf [4]byte
 
 	// The read routine parks reception beyond readBufSize.
 	bigMessage *BigMessage
@@ -1007,7 +1005,7 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		c.pendingAck = nil
+		c.pendingAck = c.pendingAck[:0]
 	}
 
 	// process packets until a PUBLISH appears
@@ -1161,9 +1159,7 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		i += 2
 
 		// enqueue for next call
-		c.readBuf[0], c.readBuf[1] = typePUBACK<<4, 2
-		c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
-		c.pendingAck = c.readBuf[:4]
+		c.pendingAck = append(c.pendingAck, typePUBACK<<4, 2, byte(packetID>>8), byte(packetID))
 
 	case exactlyOnceLevel << 1:
 		if len(c.peek) < i+2 {
@@ -1184,9 +1180,7 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 
 		// enqueue for next call
-		c.readBuf[0], c.readBuf[1] = typePUBREC<<4, 2
-		c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
-		c.pendingAck = c.readBuf[:4]
+		c.pendingAck = append(c.pendingAck, typePUBREC<<4, 2, byte(packetID>>8), byte(packetID))
 
 	default:
 		return nil, nil, fmt.Errorf("%w: PUBLISH with reserved quality-of-service level 3", errProtoReset)
@@ -1205,18 +1199,16 @@ func (c *Client) onPUBREL() error {
 		return errPacketIDZero
 	}
 
-	c.readBuf[0], c.readBuf[1] = typePUBCOMP<<4, 2
-	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
-	c.pendingAck = c.readBuf[:4]
+	c.pendingAck = append(c.pendingAck, typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
 	err := c.persistence.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
 	if err != nil {
-		c.pendingAck = nil
+		c.pendingAck = c.pendingAck[:0]
 		return err // causes resubmission of PUBREL
 	}
 	err = c.write(nil, c.pendingAck)
 	if err != nil {
 		return err // causes resubmission of PUBCOMP
 	}
-	c.pendingAck = nil
+	c.pendingAck = c.pendingAck[:0]
 	return nil
 }

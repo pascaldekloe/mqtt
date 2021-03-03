@@ -645,9 +645,7 @@ func (c *Client) onPUBREC() error {
 	}
 
 	// ceil receive with progress to release
-	c.readBuf[0], c.readBuf[1] = typePUBREL<<4|atLeastOnceLevel<<1, 2
-	c.readBuf[2], c.readBuf[3] = byte(packetID>>8), byte(packetID)
-	c.pendingAck = c.readBuf[:4]
+	c.pendingAck = append(c.pendingAck, typePUBREL<<4|atLeastOnceLevel<<1, 2, byte(packetID>>8), byte(packetID))
 	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck})
 	if err != nil {
 		return err // causes resubmission of PUBLISH (from persistence)
@@ -660,7 +658,7 @@ func (c *Client) onPUBREC() error {
 	if err != nil {
 		return err
 	}
-	c.pendingAck = nil
+	c.pendingAck = c.pendingAck[:0]
 	return nil
 }
 
