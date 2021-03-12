@@ -18,6 +18,8 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
+const messageMax = 256 * 1024 * 1024
+
 // ANSI escape codes for markup.
 const (
 	bold   = "\x1b[1m"
@@ -148,9 +150,12 @@ func main() {
 	go func() {
 		if *publishFlag != "" {
 			// publish standard input
-			message, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				log.Fatal(err)
+			message, err := io.ReadAll(io.LimitReader(os.Stdin, messageMax))
+			switch {
+			case err != nil:
+				log.Fatal(name, ": ", err)
+			case len(message) >= messageMax:
+				log.Fatalf("%s: standard input reached %d byte limit", name, messageMax)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
