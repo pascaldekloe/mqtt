@@ -4,7 +4,8 @@ services:
     image: golang:1.16
     volumes:
       - ..:/code
-    command: /code/integration/docker.sh
+    command: go test -v -count 10 -race
+    working_dir: /code/integration
     environment:
       - MQTT_HOSTS=emqx gmqtt hivemq mosquitto vernemq
 
