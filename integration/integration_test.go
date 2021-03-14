@@ -236,7 +236,7 @@ func testRoundtrip(t *testing.T, client *mqtt.Client,
 		}
 	}()
 
-	timeout := time.After(10*time.Minute)
+	timeout := time.After(10 * time.Minute)
 	for n := 1; n <= testN; n++ {
 		select {
 		case seqNo, ok := <-messages:
