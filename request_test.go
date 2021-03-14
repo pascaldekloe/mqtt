@@ -397,6 +397,17 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 	<-brokerMockDone
 }
 
+// Brokers may resend a PUBREL even after receiving PUBCOMP (in case the serice
+// crashed for example).
+func TestPUBRELRetry(t *testing.T) {
+	_, conn := newClientPipe(t)
+	brokerMockDone := testRoutine(t, func() {
+		sendPacketHex(t, conn, "62021234") // PUBREL
+		wantPacketHex(t, conn, "70021234") // PUBCOMP
+	})
+	<-brokerMockDone
+}
+
 func TestAbandon(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client, conn := newClientPipe(t)
