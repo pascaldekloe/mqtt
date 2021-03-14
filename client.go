@@ -138,7 +138,7 @@ func (c *Config) valid() error {
 	}
 
 	var err error
-	if len(c.Will.Message) != 0 {
+	if c.Will.Message != nil {
 		err = topicCheck(c.Will.Topic)
 	} else {
 		err = stringCheck(c.Will.Topic)
