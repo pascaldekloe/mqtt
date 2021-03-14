@@ -4,8 +4,8 @@
 
 … an MQTT client library for the Go programming language. Great care was taken
 to provide correctness in all scenario, including the error states. Message
-transfers in both directions have zero-copy. All errors are propagated through
-the API. There is no internal logging by the client.
+transfers in both directions have zero-copy. Errors are propagated through the
+API. There is no internal logging by design.
 
 The development was kindly sponsored by [Northvolt](https://northvolt.com), as a
 gift to the open-source community.
@@ -106,7 +106,6 @@ SEE ALSO
 ```
 
 
-
 ## Standard Compliance
 
 The implementation follows version 3.1.1 of the
@@ -121,5 +120,5 @@ computing.
 
 AWS IoT [Amazon] deviates from the standard on several significant
 [points](https://docs.aws.amazon.com/iot/latest/developerguide/mqtt.html#mqtt-differences).
-Configure the client with `AtLeastOnceMax` and `ExactlyOnceMax` set to
-either `0` or `1` to prevent seemingly random connection errors.
+Configure the client with `AtLeastOnceMax` and `ExactlyOnceMax` each set to
+either `0` or `1`, to prevent seemingly random connection errors.
