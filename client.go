@@ -262,7 +262,7 @@ type Client struct {
 	atLeastOnceBlock, exactlyOnceBlock chan holdup
 
 	// Outbout PUBLISH acknowledgement is traced by a callback channel.
-	ackQ, recQ, compQ chan chan<- error
+	atLeastOnceQ, exactlyOnceQ chan chan<- error
 
 	orderedTxs
 	unorderedTxs
@@ -296,9 +296,8 @@ func newClient(p Persistence, config *Config) *Client {
 		exactlyOnceSem:   make(chan uint, 1),
 		atLeastOnceBlock: make(chan holdup, 1),
 		exactlyOnceBlock: make(chan holdup, 1),
-		ackQ:             make(chan chan<- error, config.AtLeastOnceMax),
-		recQ:             make(chan chan<- error, config.ExactlyOnceMax),
-		compQ:            make(chan chan<- error, config.ExactlyOnceMax),
+		atLeastOnceQ:     make(chan chan<- error, config.AtLeastOnceMax),
+		exactlyOnceQ:     make(chan chan<- error, config.ExactlyOnceMax),
 		unorderedTxs: unorderedTxs{
 			perPacketID: make(map[uint16]unorderedCallback),
 		},
@@ -405,6 +404,7 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+
 		select {
 		case _, ok := <-c.atLeastOnceSem:
 			if !ok { // already terminated
@@ -415,8 +415,8 @@ func (c *Client) termCallbacks() {
 		close(c.atLeastOnceSem) // terminate
 
 		// flush queue
-		close(c.ackQ)
-		for ch := range c.ackQ {
+		close(c.atLeastOnceQ)
+		for ch := range c.atLeastOnceQ {
 			select {
 			case ch <- ErrClosed:
 			default: // won't block
@@ -427,6 +427,7 @@ func (c *Client) termCallbacks() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+
 		select {
 		case _, ok := <-c.exactlyOnceSem:
 			if !ok { // already terminated
@@ -436,16 +437,9 @@ func (c *Client) termCallbacks() {
 		}
 		close(c.exactlyOnceSem) // terminate
 
-		// flush queues
-		close(c.recQ)
-		for ch := range c.recQ {
-			select {
-			case ch <- ErrClosed:
-			default: // won't block
-			}
-		}
-		close(c.compQ)
-		for ch := range c.compQ {
+		// flush queue
+		close(c.exactlyOnceQ)
+		for ch := range c.exactlyOnceQ {
 			select {
 			case ch <- ErrClosed:
 			default: // won't block
@@ -793,13 +787,13 @@ func (c *Client) connect() error {
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
 		c.writeSem <- nil    // causes ErrDown
-		n := uint(len(c.ackQ))
+		n := uint(len(c.atLeastOnceQ))
 		if n == 0 {
 			c.atLeastOnceSem <- atLeastOnceSeqNo
 		} else {
 			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
 		}
-		n = uint(len(c.recQ) + len(c.compQ))
+		n = uint(len(c.exactlyOnceQ))
 		if n == 0 {
 			c.exactlyOnceSem <- exactlyOnceSeqNo
 		} else {
@@ -828,13 +822,13 @@ func (c *Client) connect() error {
 			// connSem entry closed
 			err = ErrClosed
 		}
-		n := uint(len(c.ackQ))
+		n := uint(len(c.atLeastOnceQ))
 		if n == 0 {
 			c.atLeastOnceSem <- atLeastOnceSeqNo
 		} else {
 			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
 		}
-		n = uint(len(c.recQ) + len(c.compQ))
+		n = uint(len(c.exactlyOnceQ))
 		if n == 0 {
 			c.exactlyOnceSem <- exactlyOnceSeqNo
 		} else {
@@ -853,18 +847,18 @@ func (c *Client) connect() error {
 	// Resend any pending PUBLISH and/or PUBREL entries from Persistence.
 	// The queues are locked because this runs within the read-routine and new
 	// submission requires either the sequence number semaphore or a holdup block.
-	if n := uint(len(c.ackQ)); n != 0 {
+	if n := uint(len(c.atLeastOnceQ)); n != 0 {
 		err := c.resendPublishPackets(atLeastOnceSeqNo-n, atLeastOnceSeqNo-1, atLeastOnceIDSpace)
 		if err != nil {
 			c.toOffline()
 			c.atLeastOnceBlock <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
-			n = uint(len(c.recQ) + len(c.compQ))
+			n = uint(len(c.exactlyOnceQ))
 			c.exactlyOnceBlock <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
 			return err
 		}
 	}
 	c.atLeastOnceSem <- atLeastOnceSeqNo
-	if n := uint(len(c.recQ) + len(c.compQ)); n != 0 {
+	if n := uint(len(c.exactlyOnceQ)); n != 0 {
 		err := c.resendPublishPackets(exactlyOnceSeqNo-n, exactlyOnceSeqNo-1, exactlyOnceIDSpace)
 		if err != nil {
 			c.toOffline()

@@ -457,7 +457,7 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.atLeastOnceSem, c.ackQ, nil, c.atLeastOnceBlock)
+	return c.submitPersisted(packet, c.atLeastOnceSem, c.atLeastOnceQ, c.atLeastOnceBlock)
 }
 
 // PublishAtLeastOnceRetained is like PublishAtLeastOnce, but the broker must
@@ -472,7 +472,7 @@ func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.atLeastOnceSem, c.ackQ, nil, c.atLeastOnceBlock)
+	return c.submitPersisted(packet, c.atLeastOnceSem, c.atLeastOnceQ, c.atLeastOnceBlock)
 }
 
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
@@ -485,7 +485,7 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.exactlyOnceSem, c.recQ, c.compQ, c.exactlyOnceBlock)
+	return c.submitPersisted(packet, c.exactlyOnceSem, c.exactlyOnceQ, c.exactlyOnceBlock)
 }
 
 // PublishExactlyOnceRetained is like PublishExactlyOnce, but the broker must
@@ -500,17 +500,17 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.exactlyOnceSem, c.recQ, c.compQ, c.exactlyOnceBlock)
+	return c.submitPersisted(packet, c.exactlyOnceSem, c.exactlyOnceQ, c.exactlyOnceBlock)
 }
 
-func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 chan chan<- error, block chan holdup) (exchange <-chan error, err error) {
+func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<- error, block chan holdup) (exchange <-chan error, err error) {
 	done := make(chan error, 2) // receives at most 1 write error + ErrClosed
 	select {
 	case counter, ok := <-sem:
 		if !ok {
 			return nil, ErrClosed
 		}
-		if cap(ackQ) == len(ackQ)+len(ackQ2) {
+		if cap(q) == len(q) {
 			sem <- counter // unlock
 			return nil, ErrMax
 		}
@@ -520,7 +520,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			sem <- counter // unlock
 			return nil, err
 		}
-		ackQ <- done // won't block due ErrMax check
+		q <- done // won't block due ErrMax check
 		switch err := c.writeBuffers(c.Offline(), packet); {
 		case err == nil:
 			sem <- counter + 1
@@ -533,7 +533,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 		}
 
 	case holdup := <-block:
-		if cap(ackQ) == len(ackQ)+len(ackQ2) {
+		if cap(q) == len(q) {
 			block <- holdup // unlock
 			return nil, ErrMax
 		}
@@ -543,7 +543,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, ackQ, ackQ2 
 			block <- holdup // unlock
 			return nil, err
 		}
-		ackQ <- done // won't block due ErrMax check
+		q <- done // won't block due ErrMax check
 		holdup.UntilSeqNo++
 		block <- holdup
 	}
@@ -595,20 +595,18 @@ func (c *Client) onPUBACK() error {
 		return fmt.Errorf("%w: PUBACK with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := uint(binary.BigEndian.Uint16(c.peek))
+
+	// match identifier
+	expect := c.orderedTxs.Acked&publishIDMask | atLeastOnceIDSpace
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
 	case packetID&^publishIDMask != atLeastOnceIDSpace:
 		return errPacketIDSpace
-	}
-
-	// match identifier
-	if len(c.ackQ) == 0 {
-		return nil // tolerates wandering PUBACK
-	}
-	expect := c.orderedTxs.Acked&publishIDMask | atLeastOnceIDSpace
-	if expect != packetID {
-		return fmt.Errorf("mqtt: PUBACK %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.ackQ))
+	case expect != packetID:
+		return fmt.Errorf("%w: PUBACK %#04x while %#04x next in line", errProtoReset, packetID, expect)
+	case len(c.atLeastOnceQ) == 0:
+		return fmt.Errorf("%w: PUBACK precedes PUBLISH", errProtoReset)
 	}
 
 	// ceil transaction
@@ -617,7 +615,7 @@ func (c *Client) onPUBACK() error {
 		return err // causes resubmission of PUBLISH
 	}
 	c.orderedTxs.Acked++
-	close(<-c.ackQ)
+	close(<-c.atLeastOnceQ)
 	return nil
 }
 
@@ -628,35 +626,32 @@ func (c *Client) onPUBREC() error {
 		return fmt.Errorf("%w: PUBREC with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := uint(binary.BigEndian.Uint16(c.peek))
+
+	// match identifier
+	expect := c.orderedTxs.Received&publishIDMask | exactlyOnceIDSpace
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
 	case packetID&^publishIDMask != exactlyOnceIDSpace:
 		return errPacketIDSpace
-	}
-
-	// match identifier
-	if len(c.recQ) == 0 {
-		return nil // tolerates wandering PUBREC
-	}
-	expect := c.orderedTxs.Received&publishIDMask | exactlyOnceIDSpace
-	if packetID != expect {
-		return fmt.Errorf("mqtt: PUBREC %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.recQ))
+	case packetID != expect:
+		return fmt.Errorf("%w: PUBREC %#04x while %#04x next in line", errProtoReset, packetID, expect)
+	case int(c.Received-c.Completed) >= len(c.exactlyOnceQ):
+		return fmt.Errorf("%w: PUBREC precedes PUBLISH", errProtoReset)
 	}
 
 	// ceil receive with progress to release
+	offset := len(c.pendingAck)
 	c.pendingAck = append(c.pendingAck, typePUBREL<<4|atLeastOnceLevel<<1, 2, byte(packetID>>8), byte(packetID))
-	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck})
+	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck[offset:]})
 	if err != nil {
 		return err // causes resubmission of PUBLISH (from persistence)
 	}
 	c.orderedTxs.Received++
-	c.compQ <- <-c.recQ
 
-	// errors cause resubmission of PUBREL (from persistence)
 	err = c.write(nil, c.pendingAck)
 	if err != nil {
-		return err
+		return err // causes resubmission of PUBREL (from Persistence)
 	}
 	c.pendingAck = c.pendingAck[:0]
 	return nil
@@ -669,29 +664,27 @@ func (c *Client) onPUBCOMP() error {
 		return fmt.Errorf("%w: PUBCOMP with %d byte remaining length", errProtoReset, len(c.peek))
 	}
 	packetID := uint(binary.BigEndian.Uint16(c.peek))
+
+	// match identifier
+	expect := c.orderedTxs.Completed&publishIDMask | exactlyOnceIDSpace
 	switch {
 	case packetID == 0:
 		return errPacketIDZero
 	case packetID&^publishIDMask != exactlyOnceIDSpace:
 		return errPacketIDSpace
-	}
-
-	// match identifier
-	if len(c.compQ) == 0 {
-		return nil // tolerates wandering PUBCOMP
-	}
-	expect := c.orderedTxs.Completed&publishIDMask | exactlyOnceIDSpace
-	if packetID != expect {
-		return fmt.Errorf("mqtt: PUBCOMP %#04x while %#04x is next in line (of %d)", packetID, expect, len(c.compQ))
+	case packetID != expect:
+		return fmt.Errorf("%w: PUBCOMP %#04x while %#04x next in line", errProtoReset, packetID, expect)
+	case c.orderedTxs.Completed >= c.orderedTxs.Received || len(c.exactlyOnceQ) == 0:
+		return fmt.Errorf("%w: PUBCOMP precedes PUBREL", errProtoReset)
 	}
 
 	// ceil transaction
 	err := c.persistence.Delete(packetID)
 	if err != nil {
-		return err // causes resubmission of PUBREL (from persistence)
+		return err // causes resubmission of PUBREL (from Persistence)
 	}
 	c.orderedTxs.Completed++
-	close(<-c.compQ)
+	close(<-c.exactlyOnceQ)
 	return nil
 }
 
@@ -820,7 +813,7 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	if len(atLeastOnceKeys) != 0 {
 		client.orderedTxs.Acked = atLeastOnceKeys[0] & publishIDMask
 		for range atLeastOnceKeys {
-			client.ackQ <- make(chan<- error, 1) // won't block due Max check above
+			client.atLeastOnceQ <- make(chan<- error, 1) // won't block due Max check above
 		}
 		<-client.atLeastOnceSem
 		client.atLeastOnceBlock <- holdup{
@@ -831,6 +824,9 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 
 	if len(exactlyOnceKeys) != 0 {
 		client.orderedTxs.Completed = exactlyOnceKeys[0] & publishIDMask
+		for range exactlyOnceKeys {
+			client.exactlyOnceQ <- make(chan<- error, 1) // won't block due Max check above
+		}
 		var pubN int
 		for i, key := range exactlyOnceKeys {
 			packet, ok := PUBRELPerKey[key]
@@ -839,9 +835,8 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 				client.orderedTxs.Received = key & publishIDMask
 				break
 			}
-			// send all those 4-byte packets in one goal
+			// send all those 4-byte packets in one batch
 			client.pendingAck = append(client.pendingAck, packet...)
-			client.compQ <- make(chan<- error, 1) // won't block due Max check above
 		}
 		if client.orderedTxs.Received == 0 {
 			client.orderedTxs.Received = exactlyOnceKeys[len(exactlyOnceKeys)-1]&publishIDMask + 1
