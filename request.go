@@ -227,7 +227,7 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	}
 	size := 2 + len(topicFilters)*3
 	for _, s := range topicFilters {
-		if err := stringCheck(s); err != nil {
+		if err := topicCheck(s); err != nil {
 			return fmt.Errorf("mqtt: SUBSCRIBE request denied on topic filter: %w", err)
 		}
 		size += len(s)
@@ -336,7 +336,7 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	size := 2 + len(topicFilters)*2
 	for _, s := range topicFilters {
 		size += len(s)
-		if err := stringCheck(s); err != nil {
+		if err := topicCheck(s); err != nil {
 			return fmt.Errorf("mqtt: UNSUBSCRIBE request denied on topic filter: %w", err)
 		}
 	}
@@ -552,7 +552,7 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<
 }
 
 func appendPublishPacket(buf *[bufSize]byte, message []byte, topic string, packetID uint, head byte) (net.Buffers, error) {
-	if err := stringCheck(topic); err != nil {
+	if err := topicCheck(topic); err != nil {
 		return nil, fmt.Errorf("mqtt: PUBLISH request denied due topic: %w", err)
 	}
 	size := 2 + len(topic) + len(message)

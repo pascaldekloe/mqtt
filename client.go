@@ -132,12 +132,20 @@ func (c *Config) valid() error {
 	if len(c.Password) > stringMax {
 		return fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
 	}
-	if err := stringCheck(c.Will.Topic); err != nil {
-		return fmt.Errorf("mqtt: illegal will topic: %w", err)
-	}
 	if len(c.Will.Message) > stringMax {
 		return fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
 	}
+
+	var err error
+	if len(c.Will.Message) != 0 {
+		err = topicCheck(c.Will.Topic)
+	} else {
+		err = stringCheck(c.Will.Topic)
+	}
+	if err != nil {
+		return fmt.Errorf("mqtt: illegal will topic: %w", err)
+	}
+
 	return nil
 }
 

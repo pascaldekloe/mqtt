@@ -75,6 +75,8 @@ var (
 
 	errUTF8 = errors.New("invalid UTF-8 byte sequence")
 	errNull = errors.New("string contains null character")
+
+	errStringZero = errors.New("string is empty")
 )
 
 // Validation errors are expected to be prefixed according to the context.
@@ -101,6 +103,15 @@ func stringCheck(s string) error {
 	return nil
 }
 
+// “All Topic Names and Topic Filters MUST be at least one character long.”
+// — MQTT Version 3.1.1, conformance statement MQTT-4.7.3-1
+func topicCheck(s string) error {
+	if s == "" {
+		return errStringZero
+	}
+	return stringCheck(s)
+}
+
 // IsDeny returns whether execution was rejected by the Client based on some
 // validation constraint, like size limitation or an illegal UTF-8 encoding.
 // The rejection is permanent in such case. Another invocation with the same
@@ -108,7 +119,7 @@ func stringCheck(s string) error {
 func IsDeny(err error) bool {
 	for err != nil {
 		switch err {
-		case errPacketMax, errStringMax, errUTF8, errNull, errSubscribeNone, errUnsubscribeNone:
+		case errPacketMax, errStringMax, errUTF8, errNull, errStringZero, errSubscribeNone, errUnsubscribeNone:
 			return true
 		}
 		err = errors.Unwrap(err)

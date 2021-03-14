@@ -270,11 +270,13 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-			0x32, 5, 0, 0,
+			0x32, 6,
+			0, 1, 'x',
 			0x80, 0x00, // 1st packet identifier
 			'1'}))
 		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-			0x32, 5, 0, 0,
+			0x32, 6,
+			0, 1, 'x',
 			0x80, 0x01, // 2nd packet identifier
 			'2'}))
 
@@ -295,15 +297,15 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		}
 	})
 
-	ack1, err := client.PublishAtLeastOnce([]byte{'1'}, "")
+	ack1, err := client.PublishAtLeastOnce([]byte{'1'}, "x")
 	if err != nil {
 		t.Errorf("publish #1 got error %q [%T]", err, err)
 	}
-	ack2, err := client.PublishAtLeastOnce([]byte{'2'}, "")
+	ack2, err := client.PublishAtLeastOnce([]byte{'2'}, "x")
 	if err != nil {
 		t.Errorf("publish #2 got error %q [%T]", err, err)
 	}
-	ack3, err := client.PublishAtLeastOnce([]byte{'3'}, "")
+	ack3, err := client.PublishAtLeastOnce([]byte{'3'}, "x")
 	if err != nil {
 		t.Errorf("publish #3 got error %q [%T]", err, err)
 	}
@@ -329,11 +331,13 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
 	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-		0x3a, 5, 0, 0, // with duplicate [DUP] flag
+		0x3a, 6, // with duplicate [DUP] flag
+		0, 1, 'x',
 		0x80, 0x01, // 2nd packet identifier
 		'2'}))
 	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-		0x3a, 5, 0, 0, // with duplicate [DUP] flag
+		0x3a, 6, // with duplicate [DUP] flag
+		0, 1, 'x',
 		0x80, 0x02, // 3rd packet identifier
 		'3'}))
 	sendPacketHex(t, brokerConn, "40028001") // SUBACK 2nd
@@ -468,8 +472,8 @@ func TestDeny(t *testing.T) {
 	// no invocation to the client allowed
 	client, _ := newClientPipe(t)
 
-	var err error
-	err = client.PublishRetained(nil, nil, "topic with \xED\xA0\x80 not allowed")
+	// UTF-8 validation
+	err := client.PublishRetained(nil, nil, "topic with \xED\xA0\x80 not allowed")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with U+D800 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
@@ -481,11 +485,6 @@ func TestDeny(t *testing.T) {
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with U+DFFF in topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-
-	err = client.Subscribe(nil)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
 	err = client.SubscribeLimitAtMostOnce(nil, "null char \x00 not allowed")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("subscribe with null character got error %q [%T], want an mqtt.IsDeny", err, err)
@@ -495,16 +494,33 @@ func TestDeny(t *testing.T) {
 		t.Errorf("subscribe with broken UTF-8 got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
 
+	err = client.Subscribe(nil)
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
 	err = client.Unsubscribe(nil)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
+	err = client.Subscribe(nil, "")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("subscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	err = client.Unsubscribe(nil, "")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("unsubscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+	err = client.Publish(nil, nil, "")
+	if !mqtt.IsDeny(err) {
+		t.Errorf("publish with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
+	}
+
+	// size limits
 	tooBig := strings.Repeat("A", 1<<16)
 	err = client.Unsubscribe(nil, tooBig)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with 64 KiB filter got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-
 	err = client.Publish(nil, make([]byte, 256*1024*1024), "")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with 256 MiB got error %q [%T], want an mqtt.IsDeny", err, err)
