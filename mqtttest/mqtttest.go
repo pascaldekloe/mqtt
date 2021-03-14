@@ -18,6 +18,18 @@ type Transfer struct {
 	Err     error  // result
 }
 
+// NewReadSlicesStub returns a new stub for mqtt.Client ReadSlices with a fixed
+// return value.
+func NewReadSlicesStub(fix Transfer) func() (message, topic []byte, err error) {
+	return func() (message, topic []byte, err error) {
+		// use copies to prevent some hard to trace issues
+		message = make([]byte, len(fix.Message))
+		copy(message, fix.Message)
+		topic = []byte(fix.Topic)
+		return message, topic, fix.Err
+	}
+}
+
 // NewReadSlicesMock returns a new mock for mqtt.Client ReadSlices, which
 // returns the Transfers in order of appearance.
 func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []byte, err error) {
@@ -39,11 +51,7 @@ func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []
 			return
 		}
 
-		// use copies to prevent some hard to trace issues
-		message = make([]byte, len(want[i].Message))
-		copy(message, want[i].Message)
-		topic = []byte(want[i].Topic)
-		return message, topic, want[i].Err
+		return NewReadSlicesStub(want[i])()
 	}
 }
 

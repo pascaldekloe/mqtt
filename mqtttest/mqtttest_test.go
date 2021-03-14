@@ -26,6 +26,7 @@ func TestSignatureMatch(t *testing.T) {
 	publishEnqueued = c.PublishExactlyOnce
 
 	// check fits
+	readSlices = mqtttest.NewReadSlicesStub(mqtttest.Transfer{})
 	readSlices = mqtttest.NewReadSlicesMock(t)
 	publish = mqtttest.NewPublishMock(t)
 	publish = mqtttest.NewPublishStub(nil)
