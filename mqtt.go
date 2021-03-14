@@ -8,7 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
+	"hash/fnv"
 	"net"
 	"os"
 	"strconv"
@@ -275,7 +275,8 @@ func (m *volatile) List() (keys []uint, err error) {
 
 type fileSystem string
 
-// FileSystem stores values per file in a directory.
+// FileSystem stores values per file in a directory. Callers must ensure the
+// availability, including write permission for the user.
 func FileSystem(dir string) Persistence {
 	if dir == "" || dir[len(dir)-1] != os.PathSeparator {
 		dir += string([]rune{os.PathSeparator})
@@ -396,17 +397,15 @@ func (r *ruggedPersistence) Save(key uint, value net.Buffers) error {
 	return r.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&r.seqNo, 1)))
 }
 
-var checkTable = crc32.MakeTable(crc32.Castagnoli)
-
 func encodeValue(packet net.Buffers, seqNo uint64) net.Buffers {
-	var sum uint32
+	digest := fnv.New32a()
 	for _, buf := range packet {
-		sum = crc32.Update(sum, checkTable, buf)
+		digest.Write(buf)
 	}
 	var buf [12]byte
 	binary.LittleEndian.PutUint64(buf[:8], seqNo)
-	sum = crc32.Update(sum, checkTable, buf[:8])
-	binary.LittleEndian.PutUint32(buf[8:], sum)
+	digest.Write(buf[:8])
+	binary.BigEndian.PutUint32(buf[8:], digest.Sum32())
 	return append(packet, buf[:])
 }
 
@@ -414,7 +413,9 @@ func decodeValue(buf []byte) (packet []byte, seqNo uint64, ok bool) {
 	if len(buf) < 12 {
 		return nil, 0, false
 	}
-	if crc32.Checksum(buf[:len(buf)-4], checkTable) != binary.LittleEndian.Uint32(buf[len(buf)-4:]) {
+	digest := fnv.New32a()
+	digest.Write(buf[:len(buf)-4])
+	if digest.Sum32() != binary.BigEndian.Uint32(buf[len(buf)-4:]) {
 		return nil, 0, false
 	}
 	return buf[:len(buf)-12], binary.LittleEndian.Uint64(buf[len(buf)-12:]), true
