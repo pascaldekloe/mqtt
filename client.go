@@ -87,7 +87,7 @@ type Config struct {
 	// Any pauses during MQTT packet submission that exceed the timeout will
 	// be treated as fatal to the connection, if detected in time. Expiry
 	// causes automated reconnects just like any other fatal network error.
-	// Operations which got interupted by WireTimeout receive a net.Error
+	// Operations which got interrupted by WireTimeout receive a net.Error
 	// with Timeout true.
 	WireTimeout time.Duration
 

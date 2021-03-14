@@ -133,7 +133,7 @@ func ExampleClient_PublishAtLeastOnce_critical() {
 				return
 			}
 
-			fmt.Println("⚠️ alert request transfer interupted:", err)
+			fmt.Println("⚠️ alert request transfer interrupted:", err)
 		}
 		fmt.Println("alert acknowledged ✓")
 		break
@@ -196,16 +196,15 @@ func ExampleClient_Subscribe_sticky() {
 				return
 			}
 
-		case errors.Is(err, mqtt.ErrMax): // limit is quite high
-			fmt.Println("subscribe hold-up:", err)
+		case errors.Is(err, mqtt.ErrMax):
+			fmt.Println("subscribe hold-up due excessive number of pending requests")
 			time.Sleep(2 * time.Second) // backoff
 
 		default:
-			fmt.Println("subscribe request transfer interupted:", err)
+			fmt.Println("subscribe request transfer interrupted:", err)
 			time.Sleep(time.Second / 2) // backoff
 		}
 	}
-
 	// Output:
 	// subscribe confirmed by broker
 }
