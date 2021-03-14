@@ -276,7 +276,7 @@ type Client struct {
 	orderedTxs
 	unorderedTxs
 
-	// The read routine sends its content as soon as possible.
+	// The read routine sends its content on the next ReadSlices.
 	pendingAck []byte
 
 	// The read routine parks reception beyond readBufSize.
@@ -996,7 +996,7 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 		if c.pendingAck[0]>>4 == typePUBREC {
 			// BUG(pascaldekloe): Save errors from a Persistence may
 			// cause duplicate reception for deliveries with an
-			// "exactly once guarantee", if the respective Client
+			// “exactly once guarantee”, if the respective Client
 			// goes down before a recovery/retry succeeds.
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.persistence.Save(key, net.Buffers{c.pendingAck})
@@ -1006,7 +1006,7 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 		}
 		err := c.write(nil, c.pendingAck)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, err // keeps pendingAck to retry
 		}
 		c.pendingAck = c.pendingAck[:0]
 	}
@@ -1202,7 +1202,8 @@ func (c *Client) onPUBREL() error {
 		return errPacketIDZero
 	}
 
-	c.pendingAck = append(c.pendingAck, typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
+	// Use pendingAck as a buffer here.
+	c.pendingAck = append(c.pendingAck[:0], typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
 	err := c.persistence.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
 	if err != nil {
 		c.pendingAck = c.pendingAck[:0]

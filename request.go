@@ -640,18 +640,18 @@ func (c *Client) onPUBREC() error {
 		return fmt.Errorf("%w: PUBREC precedes PUBLISH", errProtoReset)
 	}
 
-	// ceil receive with progress to release
-	offset := len(c.pendingAck)
-	c.pendingAck = append(c.pendingAck, typePUBREL<<4|atLeastOnceLevel<<1, 2, byte(packetID>>8), byte(packetID))
-	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck[offset:]})
+	// Use pendingAck as a buffer here.
+	c.pendingAck = append(c.pendingAck[:0], typePUBREL<<4|atLeastOnceLevel<<1, 2, byte(packetID>>8), byte(packetID))
+	err := c.persistence.Save(packetID, net.Buffers{c.pendingAck})
 	if err != nil {
+		c.pendingAck = c.pendingAck[:0]
 		return err // causes resubmission of PUBLISH (from persistence)
 	}
 	c.orderedTxs.Received++
 
 	err = c.write(nil, c.pendingAck)
 	if err != nil {
-		return err // causes resubmission of PUBREL (from Persistence)
+		return err // keeps pendingAck to retry
 	}
 	c.pendingAck = c.pendingAck[:0]
 	return nil
