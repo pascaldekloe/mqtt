@@ -57,7 +57,7 @@ type Dialer func(ctx context.Context) (net.Conn, error)
 // See net.Dial for details on the network & address syntax.
 func NewDialer(network, address string) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
-		// minimize timer use; covered by WireTimeout
+		// minimize timer use; covered by PauseTimeout
 		dialer := net.Dialer{KeepAlive: -1}
 		return dialer.DialContext(ctx, network, address)
 	}
@@ -68,7 +68,7 @@ func NewDialer(network, address string) Dialer {
 func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		dialer := tls.Dialer{
-			// minimize timer use; covered by WireTimeout
+			// minimize timer use; covered by PauseTimeout
 			NetDialer: &net.Dialer{KeepAlive: -1},
 			Config:    config,
 		}
@@ -80,16 +80,16 @@ func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 type Config struct {
 	Dialer // chooses the broker
 
-	// WireTimeout sets the minimim transfer rate as one byte per duration.
-	// Zero disables timeout protection, which leaves the Client vulnerable
-	// to blocking on stale connections.
+	// PauseTimeout sets the minimim transfer rate as one byte per duration.
+	// Zero disables timeout protection entirely, which leaves the Client
+	// vulnerable to blocking on stale connections.
 	//
 	// Any pauses during MQTT packet submission that exceed the timeout will
-	// be treated as fatal to the connection, if detected in time. Expiry
-	// causes automated reconnects just like any other fatal network error.
-	// Operations which got interrupted by WireTimeout receive a net.Error
-	// with Timeout true.
-	WireTimeout time.Duration
+	// be treated as fatal to the connection, if they are detected in time.
+	// Expiry causes automated reconnects just like any other fatal network
+	// error. Operations which got interrupted by a PauseTimeout receive a
+	// net.Error with Timeout true.
+	PauseTimeout time.Duration
 
 	// The maximum number of transactions at a time. Excess is denied with
 	// ErrMax. Zero effectively disables the respective quality-of-service
@@ -398,7 +398,7 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 	// “After sending a DISCONNECT Packet the Client MUST NOT send
 	// any more Control Packets on that Network Connection.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
-	writeErr := write(conn, packetDISCONNECT, c.WireTimeout)
+	writeErr := write(conn, packetDISCONNECT, c.PauseTimeout)
 	closeErr := conn.Close()
 	if writeErr != nil {
 		return writeErr
@@ -565,7 +565,7 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 			return err
 		}
 
-		switch err := write(conn, p, c.WireTimeout); {
+		switch err := write(conn, p, c.PauseTimeout); {
 		case err == nil:
 			c.writeSem <- conn // unlocks writes
 			return nil
@@ -590,7 +590,7 @@ func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 			return err
 		}
 
-		switch err := writeBuffers(conn, p, c.WireTimeout); {
+		switch err := writeBuffers(conn, p, c.PauseTimeout); {
 		case err == nil:
 			c.writeSem <- conn // unlocks writes
 			return nil
@@ -686,7 +686,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 		return 0, err
 	}
 
-	if c.WireTimeout != 0 {
+	if c.PauseTimeout != 0 {
 		// Abandon timer to prevent waking up the system for no good reason.
 		// https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/MinimizeTimerUse.html
 		defer c.readConn.SetReadDeadline(time.Time{})
@@ -695,8 +695,8 @@ func (c *Client) peekPacket() (head byte, err error) {
 	// decode “remaining length”
 	var size int
 	for shift := uint(0); ; shift += 7 {
-		if c.r.Buffered() == 0 && c.WireTimeout != 0 {
-			err := c.readConn.SetReadDeadline(time.Now().Add(c.WireTimeout))
+		if c.r.Buffered() == 0 && c.PauseTimeout != 0 {
+			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 			if err != nil {
 				return 0, err // deemed critical
 			}
@@ -720,7 +720,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 	// slice payload form read buffer
 	for {
 		if c.r.Buffered() < size {
-			err := c.readConn.SetReadDeadline(time.Now().Add(c.WireTimeout))
+			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 			if err != nil {
 				return 0, err // deemed critical
 			}
@@ -789,7 +789,7 @@ func (c *Client) connect() error {
 	if oldConn != nil && c.CleanSession {
 		c.CleanSession = false
 	}
-	ctx, cancel := context.WithTimeout(c.dialCtx, c.WireTimeout)
+	ctx, cancel := context.WithTimeout(c.dialCtx, c.PauseTimeout)
 	defer cancel()
 	conn, err := c.Dialer(ctx)
 	if err != nil {
@@ -901,7 +901,7 @@ func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) er
 }
 
 func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, error) {
-	err := write(conn, requestPacket, c.WireTimeout)
+	err := write(conn, requestPacket, c.PauseTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -909,8 +909,8 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	r := bufio.NewReaderSize(conn, readBufSize)
 
 	// Apply the deadline to the "entire" 4-byte response.
-	if c.WireTimeout != 0 {
-		err := conn.SetReadDeadline(time.Now().Add(c.WireTimeout))
+	if c.PauseTimeout != 0 {
+		err := conn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 		if err != nil {
 			return nil, err // deemed critical
 		}

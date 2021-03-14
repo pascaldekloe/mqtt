@@ -124,7 +124,7 @@ func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Clien
 	}
 
 	client, err := mqtt.VolatileSession("", &mqtt.Config{
-		WireTimeout:    time.Second / 4,
+		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
 		Dialer:         newTestDialer(t, clientConns...),
@@ -173,7 +173,7 @@ func TestClose(t *testing.T) {
 		Dialer: func(context.Context) (net.Conn, error) {
 			return nil, errors.New("dialer invoked")
 		},
-		WireTimeout: time.Second / 2,
+		PauseTimeout: time.Second / 2,
 	})
 	if err != nil {
 		t.Fatal("volatile session error:", err)
@@ -287,7 +287,7 @@ func TestDown(t *testing.T) {
 			}
 			return clientEnd, nil
 		},
-		WireTimeout:    time.Second / 4,
+		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
 	})

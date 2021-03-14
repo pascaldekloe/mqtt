@@ -90,8 +90,8 @@ func parseConfig() (clientID string, config *mqtt.Config) {
 	}
 
 	config = &mqtt.Config{
-		WireTimeout: *timeoutFlag,
-		UserName:    *userFlag,
+		PauseTimeout: *timeoutFlag,
+		UserName:     *userFlag,
 	}
 	if *passFlag != "" {
 		bytes, err := os.ReadFile(*passFlag)

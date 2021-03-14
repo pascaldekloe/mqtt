@@ -204,7 +204,7 @@ func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 		t.Errorf("got error %q [%T]", err, err)
 	}
 	select {
-	case <-time.After(client.WireTimeout):
+	case <-time.After(client.PauseTimeout):
 		t.Error("ack timeout")
 	case err, ok := <-ack:
 		var e net.Error
@@ -257,7 +257,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 
 	clientConn, brokerConn := net.Pipe()
 	client, err := mqtt.InitSession("test-client", p, &mqtt.Config{
-		WireTimeout:    time.Second / 4,
+		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
 		Dialer:         newTestDialer(t, clientConn),
 	})
@@ -317,7 +317,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	// continue with another Client
 	clientConn, brokerConn = net.Pipe()
 	client, warn, err := mqtt.AdoptSession(p, &mqtt.Config{
-		WireTimeout:    time.Second / 4,
+		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
 		Dialer:         newTestDialer(t, clientConn),
 	})
@@ -383,7 +383,7 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 		t.Errorf("got error %q [%T]", err, err)
 	}
 	select {
-	case <-time.After(client.WireTimeout):
+	case <-time.After(client.PauseTimeout):
 		t.Error("ack timeout")
 	case err, ok := <-ack:
 		var e net.Error

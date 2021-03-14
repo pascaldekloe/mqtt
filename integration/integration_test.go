@@ -25,7 +25,7 @@ func hosts(tb testing.TB) []string {
 // NewTestClient returns an instance for testing.
 func newTestClient(t *testing.T, host string, config *mqtt.Config) (client *mqtt.Client, messages <-chan uint64) {
 	config.Dialer = mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883"))
-	config.WireTimeout = 2 * time.Second
+	config.PauseTimeout = 2 * time.Second
 	config.CleanSession = true
 	client, err := mqtt.VolatileSession(t.Name(), config)
 	if err != nil {
