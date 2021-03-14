@@ -17,6 +17,46 @@ This is free and unencumbered software released into the
 [![Build Status](https://travis-ci.org/pascaldekloe/mqtt.svg?branch=master)](https://travis-ci.org/pascaldekloe/mqtt)
 
 
+## Introduction
+
+Message transfer without confirmation can be quite simple.
+
+```go
+	err := client.Publish(nil, []byte("20.8℃"), "bedroom")
+	if err != nil {
+		log.Print("thermostat update lost: ", err)
+		return
+	}
+```
+
+A read routine sees inbound messages one by one.
+
+```go
+	for {
+		message, topic, err := client.ReadSlices()
+		switch {
+		case err == nil:
+			r, _ := utf8.DecodeLastRune(message)
+			switch r {
+			case 'K', '℃', '℉':
+				log.Printf("%s at %q", message, topic)
+			}
+
+		case errors.Is(err, mqtt.ErrClosed):
+			return // terminated
+
+		default:
+			log.Print("broker unavailable: ", err)
+			time.Sleep(time.Second) // backoff
+		}
+	}
+```
+
+The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
+from the package documentation provide a good start with detailed configuration
+options.
+
+
 ## Command-Line Client
 
 Run `go install github.com/pascaldekloe/mqtt/cmd/mqttc` to build the binary.
