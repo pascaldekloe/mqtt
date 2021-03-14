@@ -52,7 +52,7 @@ A read routine sees inbound messages one by one.
 	}
 ```
 
-The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
+The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt@v1.0.0-rc#pkg-examples)
 from the package documentation provide a good start with detailed configuration
 options.
 
