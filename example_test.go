@@ -57,13 +57,13 @@ func ExampleClient_setup() {
 				return // terminated
 
 			case mqtt.IsConnectionRefused(err):
-				log.Print("queue unavailable: ", err)
-				// ErrDown for a while
+				log.Print(err) // explains rejection
+				// mqtt.ErrDown for a while
 				time.Sleep(15 * time.Minute)
 
 			default:
-				log.Print("queue unavailable: ", err)
-				// ErrDown during backoff
+				log.Print("broker unavailable: ", err)
+				// mqtt.ErrDown during backoff
 				time.Sleep(2 * time.Second)
 			}
 		}
