@@ -9,10 +9,10 @@ import (
 	"sync"
 )
 
-// ErrMax denies a request on transit capacity, which prevents blocking.
-// Ping has a limit of 1 slot. Subscribe and Unsubscribe share their slots.
-// PublishAtLeastOnce and PublishExactlyOnce each have a configurable limit.
-// The plain Publish has no limit though.
+// ErrMax denies a request on transit capacity, which prevents the Client from
+// blocking. Ping has a limit of 1 slot. Subscribe and Unsubscribe share a large
+// number of slots. PublishAtLeastOnce and PublishExactlyOnce each have a limit
+// defined by Config. A plain Publish (at most once) has no limit.
 var ErrMax = errors.New("mqtt: maximum number of pending requests reached")
 
 // ErrCanceled means that a quit signal got applied before the request was send.

@@ -93,7 +93,8 @@ type Config struct {
 
 	// The maximum number of transactions at a time. Excess is denied with
 	// ErrMax. Zero effectively disables the respective quality-of-service
-	// level.
+	// level. Negative values default to the Client limit of 16,384. Higher
+	// values are truncated silently.
 	AtLeastOnceMax, ExactlyOnceMax int
 
 	// The user name may be used by the broker for authentication and/or
