@@ -92,13 +92,13 @@ func NewPublishMock(t testing.TB, want ...Transfer) func(quit <-chan struct{}, m
 
 // NewPublishStub returns a new stub for mqtt.Client Publish with a fixed return
 // value.
-func NewPublishStub(returnFix error) func(quit <-chan struct{}, message []byte, topic string) error {
+func NewPublishStub(fix error) func(quit <-chan struct{}, message []byte, topic string) error {
 	return func(quit <-chan struct{}, message []byte, topic string) error {
 		select {
 		case <-quit:
 			return mqtt.ErrCanceled
 		default:
-			return returnFix
+			return fix
 		}
 	}
 }
@@ -113,13 +113,13 @@ func (b ExchangeBlock) Error() string {
 	return "mqtttest: ExchangeBlock used as an error"
 }
 
-// NewPublishEnqueuedStub returns a stub for mqtt.Client PublishAtLeastOnce or
+// NewPublishExchangeStub returns a stub for mqtt.Client PublishAtLeastOnce or
 // PublishExactlyOnce with a fixed return value.
 //
 // The exchangeFix errors are applied to the exchange return, with an option for
 // ExchangeBlock entries. An mqtt.ErrClosed in the exchangeFix keeps the
 // exchange channel open (without an extra ExchangeBlock entry).
-func NewPublishEnqueuedStub(errFix error, exchangeFix ...error) func(message []byte, topic string) (exchange <-chan error, err error) {
+func NewPublishExchangeStub(errFix error, exchangeFix ...error) func(message []byte, topic string) (exchange <-chan error, err error) {
 	if errFix != nil && len(exchangeFix) != 0 {
 		panic("exchangeFix entries with non-nil errFix")
 	}
@@ -169,17 +169,17 @@ func NewPublishEnqueuedStub(errFix error, exchangeFix ...error) func(message []b
 
 // NewSubscribeStub returns a stub for mqtt.Client Subscribe with a fixed return
 // value.
-func NewSubscribeStub(returnFix error) func(quit <-chan struct{}, topicFilters ...string) error {
-	return newSubscribeStub("subscribe", returnFix)
+func NewSubscribeStub(fix error) func(quit <-chan struct{}, topicFilters ...string) error {
+	return newSubscribeStub("subscribe", fix)
 }
 
 // NewUnsubscribeStub returns a stub for mqtt.Client Unsubscribe with a fixed
 // return value.
-func NewUnsubscribeStub(returnFix error) func(quit <-chan struct{}, topicFilters ...string) error {
-	return newSubscribeStub("unsubscribe", returnFix)
+func NewUnsubscribeStub(fix error) func(quit <-chan struct{}, topicFilters ...string) error {
+	return newSubscribeStub("unsubscribe", fix)
 }
 
-func newSubscribeStub(name string, returnFix error) func(quit <-chan struct{}, topicFilters ...string) error {
+func newSubscribeStub(name string, fix error) func(quit <-chan struct{}, topicFilters ...string) error {
 	return func(quit <-chan struct{}, topicFilters ...string) error {
 		if len(topicFilters) == 0 {
 			// TODO(pascaldekloe): move validation to internal
@@ -192,7 +192,7 @@ func newSubscribeStub(name string, returnFix error) func(quit <-chan struct{}, t
 		default:
 			break
 		}
-		return returnFix
+		return fix
 	}
 }
 

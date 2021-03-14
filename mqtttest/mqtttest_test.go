@@ -30,7 +30,7 @@ func TestSignatureMatch(t *testing.T) {
 	readSlices = mqtttest.NewReadSlicesMock(t)
 	publish = mqtttest.NewPublishMock(t)
 	publish = mqtttest.NewPublishStub(nil)
-	publishEnqueued = mqtttest.NewPublishEnqueuedStub(nil)
+	publishEnqueued = mqtttest.NewPublishExchangeStub(nil)
 	subscribe = mqtttest.NewSubscribeMock(t)
 	subscribe = mqtttest.NewSubscribeStub(nil)
 	unsubscribe = mqtttest.NewUnsubscribeMock(t)
