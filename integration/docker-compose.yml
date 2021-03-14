@@ -4,7 +4,7 @@ services:
     image: golang:1.16
     volumes:
       - ..:/code
-    command: go test -v -count 10 -race
+    command: go test -v -race
     working_dir: /code/integration
     environment:
       - MQTT_HOSTS=emqx gmqtt hivemq mosquitto vernemq
