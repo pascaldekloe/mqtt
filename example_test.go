@@ -5,9 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/pascaldekloe/mqtt"
@@ -27,7 +24,7 @@ var Subscribe func(quit <-chan struct{}, topicFilters ...string) error
 var Online func() <-chan struct{}
 
 func init() {
-	PublishAtLeastOnce = mqtttest.NewPublishEnqueuedStub(nil)
+	PublishAtLeastOnce = mqtttest.NewPublishExchangeStub(nil)
 	Subscribe = mqtttest.NewSubscribeStub(nil)
 	Online = func() <-chan struct{} { return nil }
 }
@@ -75,30 +72,6 @@ func ExampleClient_setup() {
 	// Install each method in use as a package variable. Such setup is
 	// compatible with the tools proveded from the mqtttest subpackage.
 	Publish = client.Publish
-
-	// apply signals
-	go func() {
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-		for sig := range signals {
-			switch sig {
-			case syscall.SIGINT:
-				log.Print("MQTT close on SIGINT…")
-				err := client.Close()
-				if err != nil {
-					log.Print(err)
-				}
-
-			case syscall.SIGTERM:
-				log.Print("MQTT disconnect on SIGTERM…")
-				err := client.Disconnect(nil)
-				if err != nil {
-					log.Print(err)
-				}
-			}
-		}
-	}()
-
 	// Output:
 }
 
