@@ -19,37 +19,38 @@ This is free and unencumbered software released into the
 
 ## Introduction
 
-Message transfer without confirmation can be quite simple.
+The client supports confirmed message delivery with full progress disclosure.
+Message transfers without an confirmation can be as simple as the following.
 
 ```go
-	err := client.Publish(nil, []byte("20.8℃"), "bedroom")
-	if err != nil {
-		log.Print("thermostat update lost: ", err)
-		return
-	}
+err := client.Publish(ctx.Done(), []byte("20.8℃"), "bedroom")
+if err != nil {
+	log.Print("thermostat update lost: ", err)
+	return
+}
 ```
 
 A read routine sees inbound messages one by one.
 
 ```go
-	for {
-		message, topic, err := client.ReadSlices()
-		switch {
-		case err == nil:
-			r, _ := utf8.DecodeLastRune(message)
-			switch r {
-			case 'K', '℃', '℉':
-				log.Printf("%s at %q", message, topic)
-			}
-
-		case errors.Is(err, mqtt.ErrClosed):
-			return // terminated
-
-		default:
-			log.Print("broker unavailable: ", err)
-			time.Sleep(time.Second) // backoff
+for {
+	message, topic, err := client.ReadSlices()
+	switch {
+	case err == nil:
+		r, _ := utf8.DecodeLastRune(message)
+		switch r {
+		case 'K', '℃', '℉':
+			log.Printf("%s at %q", message, topic)
 		}
+
+	case errors.Is(err, mqtt.ErrClosed):
+		return // terminated
+
+	default:
+		log.Print("broker unavailable: ", err)
+		time.Sleep(time.Second) // backoff
 	}
+}
 ```
 
 The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt@v1.0.0-rc#pkg-examples)
@@ -158,7 +159,5 @@ There are no plans to support protocol version 5. Version 3 is lean and well
 suited for IOT. The additions in version 5 may be more of a fit for backend
 computing.
 
-AWS IoT [Amazon] deviates from the standard on several significant
-[points](https://docs.aws.amazon.com/iot/latest/developerguide/mqtt.html#mqtt-differences).
-Configure the client with `AtLeastOnceMax` and `ExactlyOnceMax` each set to
-either `0` or `1`, to prevent seemingly random connection errors.
+See the [Broker wiki](https://github.com/pascaldekloe/mqtt/wiki/Brokers) for
+implementation specifics.
