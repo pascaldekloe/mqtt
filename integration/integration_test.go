@@ -14,6 +14,11 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
+// BatchSize is a reasonable number of messages which should not cause any of
+// them to be dropped (by the broker) when send sequentially.
+const batchSize = 99
+const batchTimeout = time.Minute
+
 func hosts(tb testing.TB) []string {
 	s, ok := os.LookupEnv("MQTT_HOSTS")
 	if !ok {
@@ -110,14 +115,13 @@ func raceAtLevel(t *testing.T, client *mqtt.Client, messages <-chan uint64, deli
 	defer cancel()
 	testTopic := t.Name()
 
-	const testN = 100 // message amount
 	launch := make(chan struct{})
 
 	// install contenders
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Add(testN)
-	for n := uint64(1); n <= testN; n++ {
+	wg.Add(batchSize)
+	for n := uint64(1); n <= batchSize; n++ {
 		go func(seqNo uint64) {
 			defer wg.Done()
 
@@ -163,15 +167,15 @@ func raceAtLevel(t *testing.T, client *mqtt.Client, messages <-chan uint64, deli
 	time.Sleep(50 * time.Millisecond)
 	close(launch)
 
-	timeout := time.After(time.Minute)
-	for i := 0; i < testN; i++ {
+	timeout := time.After(batchTimeout)
+	for i := 0; i < batchSize; i++ {
 		select {
 		case _, ok := <-messages:
 			if !ok {
-				t.Fatalf("want %d more messages", testN-i)
+				t.Fatalf("want %d more messages", batchSize-i)
 			}
 		case <-timeout:
-			t.Fatalf("timeout; want %d more messages", testN-i)
+			t.Fatalf("timeout; want %d more messages", batchSize-i)
 		}
 	}
 }
@@ -179,38 +183,42 @@ func raceAtLevel(t *testing.T, client *mqtt.Client, messages <-chan uint64, deli
 func TestRoundtrip(t *testing.T) {
 	for _, host := range hosts(t) {
 		t.Run(host, func(t *testing.T) {
+			const testN = 17_000 // causes an mqtt.publishIDMask overflow
 			t.Run("at-least-once", func(t *testing.T) {
 				client, messages := newTestClient(t, host, &mqtt.Config{
 					AtLeastOnceMax: 9,
 				})
-				testRoundtrip(t, client, client.PublishAtLeastOnce, messages)
+				for i := 0; i < testN; i += batchSize {
+					testRoundtripBatch(t, client, client.PublishAtLeastOnce, messages)
+				}
 			})
 
 			t.Run("exactly-once", func(t *testing.T) {
 				client, messages := newTestClient(t, host, &mqtt.Config{
 					ExactlyOnceMax: 9,
 				})
-				testRoundtrip(t, client, client.PublishExactlyOnce, messages)
+				for i := 0; i < testN; i += batchSize {
+					testRoundtripBatch(t, client, client.PublishExactlyOnce, messages)
+				}
 			})
 		})
 	}
 }
 
-func testRoundtrip(t *testing.T, client *mqtt.Client,
+func testRoundtripBatch(t *testing.T, client *mqtt.Client,
 	publish func(message []byte, topic string) (exchange <-chan error, err error),
 	messages <-chan uint64) {
 	testTopic := t.Name()
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	const testN = 17_000 // causes mqtt.publishIDMask overflow
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		message := make([]byte, 8)
-		for n := uint64(1); n <= testN; {
+		for n := uint64(1); n <= batchSize; {
 			binary.LittleEndian.PutUint64(message, n)
 			exchange, err := publish(message, testTopic)
 			switch {
@@ -236,18 +244,18 @@ func testRoundtrip(t *testing.T, client *mqtt.Client,
 		}
 	}()
 
-	timeout := time.After(10 * time.Minute)
-	for n := 1; n <= testN; n++ {
+	timeout := time.After(batchTimeout)
+	for n := 1; n <= batchSize; n++ {
 		select {
 		case seqNo, ok := <-messages:
 			if !ok {
-				t.Fatalf("did not receive message # %d–%d", n, testN)
+				t.Fatalf("did not receive message # %d–%d", n, batchSize)
 			}
 			if seqNo != uint64(n) {
 				t.Errorf("want message # %d, got # %d", n, seqNo)
 			}
 		case <-timeout:
-			t.Fatalf("timeout before message # %d-%d", n, testN)
+			t.Fatalf("timeout before message # %d-%d", n, batchSize)
 		}
 	}
 }
