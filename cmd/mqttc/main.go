@@ -128,8 +128,6 @@ func getExitStatus() (code int) {
 	return
 }
 
-var client *mqtt.Client
-
 func main() {
 	log.SetFlags(0)
 	flag.Usage = printManual
@@ -139,13 +137,12 @@ func main() {
 	}
 
 	clientID, config := parseConfig()
-	var err error
-	client, err = mqtt.VolatileSession(clientID, config)
+	client, err := mqtt.VolatileSession(clientID, config)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	go applySignals()
+	go applySignals(client)
 
 	go func() {
 		if *publishFlag != "" {
@@ -308,7 +305,7 @@ func printMessage(message, topic interface{}) {
 	}
 }
 
-func applySignals() {
+func applySignals(client *mqtt.Client) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	for sig := range signals {
