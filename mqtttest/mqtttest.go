@@ -38,12 +38,16 @@ func NewReadSlicesMock(t testing.TB, want ...Transfer) func() (message, topic []
 	var wantIndex uint64
 
 	t.Cleanup(func() {
+		t.Helper()
+
 		if n := uint64(len(want)) - atomic.LoadUint64(&wantIndex); n > 0 {
 			t.Errorf("want %d more MQTT ReadSlices", n)
 		}
 	})
 
 	return func() (message, topic []byte, err error) {
+		t.Helper()
+
 		i := atomic.AddUint64(&wantIndex, 1) - 1
 		if i >= uint64(len(want)) {
 			err = errors.New("unwanted MQTT ReadSlices")
@@ -69,6 +73,8 @@ func NewPublishMock(t testing.TB, want ...Transfer) func(quit <-chan struct{}, m
 	})
 
 	return func(quit <-chan struct{}, message []byte, topic string) error {
+		t.Helper()
+
 		select {
 		case <-quit:
 			return mqtt.ErrCanceled
@@ -228,6 +234,7 @@ func newSubscribeMock(name string, t testing.TB, want ...Filter) func(quit <-cha
 	})
 
 	return func(quit <-chan struct{}, topicFilters ...string) error {
+		t.Helper()
 		if len(topicFilters) == 0 {
 			t.Fatalf("MQTT %s without topic filters", name)
 		}
