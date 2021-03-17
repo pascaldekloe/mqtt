@@ -926,21 +926,21 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	packet, err := r.Peek(4)
 	switch {
 	case c.dialCtx.Err() != nil:
-		return nil, ErrClosed
-	case len(packet) == 0:
-		return nil, fmt.Errorf("mqtt: no CONNACK: %w", err)
+		err = ErrClosed
 	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
 		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
-	case err != nil:
-		return nil, fmt.Errorf("mqtt: incomplete CONNACK %#x: %w", packet, err)
-	case connectReturn(packet[3]) != accepted:
+	case len(packet) > 3 && connectReturn(packet[3]) != accepted:
 		return nil, connectReturn(packet[3])
-	}
-	r.Discard(len(packet)) // no errors guaranteed
-	if errors.Is(err, io.EOF) {
+	case err == nil:
+		r.Discard(len(packet)) // no errors guaranteed
+		return r, nil
+	case errors.Is(err, io.EOF): // doesn't match io.ErrUnexpectedEOF
 		err = errBrokerTerm
 	}
-	return r, err
+	if len(packet) != 4 {
+		err = fmt.Errorf("%w; CONNECT not confirmed", err)
+	}
+	return nil, err
 }
 
 // ReadSlices should be invoked consecutively from a single goroutine until
