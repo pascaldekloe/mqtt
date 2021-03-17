@@ -2,6 +2,23 @@
 // protocol.
 //
 // http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
+//
+// Publish and Disconnect do fire-and-forget submission. ErrClosed, ErrDown,
+// ErrCanceled or an IsDeny [Publish only] imply no request submission. All
+// other errors imply that the request submission was interrupted by either a
+// connection failure or a PauseTimeout appliance.
+//
+// Ping, Subscribe and Unsubscribe await response from the broker. ErrClosed,
+// ErrDown, ErrMax, ErrCanceled or an IsDeny [Subscribe and Unsubscribe only]
+// imply no request submission. ErrBreak and ErrAbandoned leave with the broker
+// response unknown. Subscribe responses may cause an SubscribeError. All other
+// errors imply that the request submission was interrupted by either a
+// connection failure or a PauseTimeout appliance.
+//
+// PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence
+// before network submission. Errors imply that the message was dropped: either
+// ErrClosed, ErrMax, Save failure and an IsDeny. Further errors are reported to
+// the respective exchange channel. None of them are fatal, including ErrClosed.
 package mqtt
 
 import (
@@ -130,7 +147,8 @@ func IsDeny(err error) bool {
 // ConnectReturn is the response code from CONNACK.
 type connectReturn byte
 
-// Connect return errors are predefined reasons for a broker to deny a session.
+// Connect return errors are predefined reasons for a broker to deny a connect
+// request. IsConnectionRefused returns true for each of these.
 const (
 	accepted connectReturn = iota
 
@@ -368,11 +386,13 @@ func (dir fileSystem) List() (keys []uint, err error) {
 	return keys, nil
 }
 
-// ruggedPersistence applies a sequence number plus integrity checks.
+// ruggedPersistence applies a sequence number plus integrity checks to a
+// delegate.
 type ruggedPersistence struct {
-	Persistence
-	// Content is ordered based on this sequence number.
-	// Zero gets applied to the clientIDKey value.
+	Persistence // delegate
+
+	// Content is ordered based on this sequence number. The clientIDKey
+	// will have zero, as it is set [Save] only once as the first thing.
 	seqNo uint64
 }
 
