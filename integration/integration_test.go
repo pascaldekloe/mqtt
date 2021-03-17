@@ -67,7 +67,7 @@ func newTestClient(t *testing.T, host string, config *mqtt.Config) (client *mqtt
 				return
 
 			default:
-				t.Log("client error:", err)
+				t.Log(err)
 				time.Sleep(time.Second / 2)
 			}
 		}
@@ -82,7 +82,7 @@ func newTestClient(t *testing.T, host string, config *mqtt.Config) (client *mqtt
 			time.Sleep(10 * time.Millisecond)
 			continue
 		default:
-			t.Fatal("subscribe error: ", err)
+			t.Fatal(err)
 		}
 	}
 }

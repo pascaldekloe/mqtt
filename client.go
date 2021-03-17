@@ -424,10 +424,11 @@ func (c *Client) termCallbacks() {
 		close(c.atLeastOnceSem) // terminate
 
 		// flush queue
+		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
 		close(c.atLeastOnceQ)
 		for ch := range c.atLeastOnceQ {
 			select {
-			case ch <- ErrClosed:
+			case ch <- err:
 			default: // won't block
 			}
 		}
@@ -447,10 +448,11 @@ func (c *Client) termCallbacks() {
 		close(c.exactlyOnceSem) // terminate
 
 		// flush queue
+		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
 		close(c.exactlyOnceQ)
 		for ch := range c.exactlyOnceQ {
 			select {
-			case ch <- ErrClosed:
+			case ch <- err:
 			default: // won't block
 			}
 		}
@@ -459,7 +461,7 @@ func (c *Client) termCallbacks() {
 	select {
 	case ack, ok := <-c.pingAck:
 		if ok {
-			ack <- ErrBreak
+			ack <- fmt.Errorf("%w; PING not confirmed", ErrBreak)
 		}
 	default:
 		break

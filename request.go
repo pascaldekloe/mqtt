@@ -42,12 +42,12 @@ var bufPool = sync.Pool{New: func() interface{} { return new([bufSize]byte) }}
 // in either ErrCanceled or ErrAbandoned.
 func (c *Client) Ping(quit <-chan struct{}) error {
 	// install callback
-	ch := make(chan error, 1)
+	done := make(chan error, 1)
 	select {
-	case c.pingAck <- ch:
+	case c.pingAck <- done:
 		break // OK
 	default:
-		return ErrMax
+		return fmt.Errorf("%w; PING unavailable", ErrMax)
 	}
 
 	// submit transaction
@@ -56,17 +56,18 @@ func (c *Client) Ping(quit <-chan struct{}) error {
 		case <-c.pingAck: // unlock
 		default: // picked up by unrelated pong
 		}
-		return err
+		return fmt.Errorf("%w; PING request interrupted", err)
 	}
+
 	select {
-	case err := <-ch:
+	case err := <-done:
 		return err
 	case <-quit:
 		select {
 		case <-c.pingAck: // unlock
-			return ErrAbandoned
+			return fmt.Errorf("%w; PING not confirmed", ErrAbandoned)
 		default: // picked up in mean time
-			return <-ch
+			return <-done
 		}
 	}
 }
@@ -196,7 +197,7 @@ func (txs *unorderedTxs) breakAll() {
 	defer txs.Unlock()
 	for packetID, callback := range txs.perPacketID {
 		delete(txs.perPacketID, packetID)
-		callback.done <- ErrBreak
+		callback.done <- fmt.Errorf("%w; subscription change not confirmed", ErrBreak)
 	}
 }
 
@@ -239,7 +240,7 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	// slot assignment
 	packetID, done, err := c.unorderedTxs.startTx(topicFilters)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; SUBSCRIBE unavailable", err)
 	}
 
 	// request packet composition
@@ -261,14 +262,15 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	// network submission
 	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return err
+		return fmt.Errorf("%w; SUBSCRIBE request interrupted", err)
 	}
+
 	select {
 	case err := <-done:
 		return err
 	case <-quit:
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return ErrAbandoned
+		return fmt.Errorf("%w; SUBSCRIBE not confirmed", ErrAbandoned)
 	}
 }
 
@@ -347,7 +349,7 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	// slot assignment
 	packetID, done, err := c.unorderedTxs.startTx(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; UNSUBSCRIBE unavailable", err)
 	}
 
 	// request packet composition
@@ -370,14 +372,15 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	// network submission
 	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return err
+		return fmt.Errorf("%w; UNSUBSCRIBE request interrupted", err)
 	}
+
 	select {
 	case err := <-done:
 		return err
 	case <-quit:
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return ErrAbandoned
+		return fmt.Errorf("%w; UNSUBSCRIBE not confirmed", ErrAbandoned)
 	}
 }
 
@@ -508,17 +511,17 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<
 	select {
 	case counter, ok := <-sem:
 		if !ok {
-			return nil, ErrClosed
+			return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrClosed)
 		}
 		if cap(q) == len(q) {
 			sem <- counter // unlock
-			return nil, ErrMax
+			return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrMax)
 		}
 		packetID := applyPublishSeqNo(packet, counter)
 		err = c.persistence.Save(packetID, packet)
 		if err != nil {
 			sem <- counter // unlock
-			return nil, err
+			return nil, fmt.Errorf("%w; PUBLISH dropped", err)
 		}
 		q <- done // won't block due ErrMax check
 		switch err := c.writeBuffers(c.Offline(), packet); {
@@ -528,20 +531,20 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<
 			// don't report down
 			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		default:
-			done <- err
+			done <- fmt.Errorf("%w; PUBLISH request delayed", err)
 			block <- holdup{SinceSeqNo: counter, UntilSeqNo: counter}
 		}
 
 	case holdup := <-block:
 		if cap(q) == len(q) {
 			block <- holdup // unlock
-			return nil, ErrMax
+			return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrMax)
 		}
 		packetID := applyPublishSeqNo(packet, holdup.UntilSeqNo+1)
 		err = c.persistence.Save(packetID, packet)
 		if err != nil {
 			block <- holdup // unlock
-			return nil, err
+			return nil, fmt.Errorf("%w; PUBLISH dropped", err)
 		}
 		q <- done // won't block due ErrMax check
 		holdup.UntilSeqNo++

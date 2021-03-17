@@ -217,9 +217,6 @@ func execPubSub(client *mqtt.Client) {
 			}
 		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
 			return
-		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
-			failMQTT(client, fmt.Errorf("%s: publish timeout; %s", name, err))
-			return
 		default:
 			failMQTT(client, err)
 			return
@@ -238,8 +235,6 @@ func execPubSub(client *mqtt.Client) {
 			}
 		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
 			break
-		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
-			failMQTT(client, fmt.Errorf("%s: subscribe timeout; %s", name, err))
 		default:
 			failMQTT(client, err)
 		}
@@ -256,9 +251,6 @@ func execPubSub(client *mqtt.Client) {
 		case err == nil:
 			break // OK
 		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-			return
-		case errors.Is(err, mqtt.ErrCanceled), errors.Is(err, mqtt.ErrAbandoned):
-			failMQTT(client, fmt.Errorf("%s: ping timeout; %s", name, err))
 			return
 		default:
 			failMQTT(client, err)
