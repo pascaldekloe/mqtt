@@ -1204,13 +1204,12 @@ func (c *Client) onPUBREL() error {
 		return errPacketIDZero
 	}
 
-	// Use pendingAck as a buffer here.
-	c.pendingAck = append(c.pendingAck[:0], typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
-	err := c.persistence.Save(packetID|remoteIDKeyFlag, net.Buffers{c.pendingAck})
+	err := c.persistence.Delete(packetID | remoteIDKeyFlag)
 	if err != nil {
-		c.pendingAck = c.pendingAck[:0]
 		return err // causes resubmission of PUBREL
 	}
+	// Use pendingAck as a buffer here.
+	c.pendingAck = append(c.pendingAck[:0], typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
 	err = c.write(nil, c.pendingAck)
 	if err != nil {
 		return err // causes resubmission of PUBCOMP
