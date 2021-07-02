@@ -78,8 +78,16 @@ DESCRIPTION
 	applied, which is 1883 for plain connections and 8883 for TLS.
 
 OPTIONS
+  -ca file
+    	Amend the trusted certificate authorities with a PEM file.
+  -cert file
+    	Use a client certificate from a PEM file (with a corresponding
+    	-key option).
   -client identifier
     	Use a specific client identifier. (default "generated")
+  -key file
+    	Use a private key (matching the client certificate) from a PEM
+    	file.
   -net name
     	Select the network by name. Valid alternatives include tcp4,
     	tcp6 and unix. (default "tcp")
