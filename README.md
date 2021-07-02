@@ -2,10 +2,11 @@
 
 ## About
 
-… an MQTT client library for the Go programming language. Great care was taken
-to provide correctness in all scenario, including the error states. Message
-transfers in both directions have zero-copy. Errors are propagated through the
-API. There is no internal logging by design.
+MQTT is a protocol for message queueing over a network. This project provides a
+client library for the Go programming language. Message-delivery guarantees are
+maintained at all costs, even on (protocol, network or persistence) errors. The
+client recovers from errors atomatically. Message transfers in both directions
+do zero-copy.
 
 The development was kindly sponsored by [Northvolt](https://northvolt.com), as a
 gift to the open-source community.
@@ -30,7 +31,7 @@ if err != nil {
 }
 ```
 
-A read routine sees inbound messages one by one.
+A read routine sees inbound messages from any of the subscribed topics.
 
 ```go
 for {
@@ -40,11 +41,11 @@ for {
 		r, _ := utf8.DecodeLastRune(message)
 		switch r {
 		case 'K', '℃', '℉':
-			log.Printf("%s at %q", message, topic)
+			log.Printf("%q at %q", message, topic)
 		}
 
 	case errors.Is(err, mqtt.ErrClosed):
-		return // terminated
+		return // client terminated
 
 	default:
 		log.Print("broker unavailable: ", err)
@@ -54,8 +55,8 @@ for {
 ```
 
 The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
-from the package documentation provide a good start with detailed configuration
-options.
+from the package documentation provide more detail on error reporting and the
+delivery alternatives.
 
 
 ## Command-Line Client
