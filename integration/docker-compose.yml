@@ -7,7 +7,7 @@ services:
     command: go test -v -race
     working_dir: /code/integration
     environment:
-      - MQTT_HOSTS=emqx gmqtt hivemq mosquitto vernemq
+      - MQTT_HOSTS=emqx gmqtt hivemq hmq mosquitto vernemq
 
   emqx:
     image: emqx/emqx:4.2.5
@@ -15,6 +15,8 @@ services:
     image: gmqtt/gmqttd:v0.2.2
   hivemq:
     image: hivemq/hivemq4:4.4.4
+  hmq:
+    image: habakke/hmq:2.0.57
   mosquitto:
     image: eclipse-mosquitto:1.6.12
   vernemq:
