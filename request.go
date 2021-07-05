@@ -460,7 +460,7 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.atLeastOnceSem, c.atLeastOnceQ, c.atLeastOnceBlock)
+	return c.submitPersisted(packet, &c.atLeastOnce)
 }
 
 // PublishAtLeastOnceRetained is like PublishAtLeastOnce, but the broker must
@@ -475,7 +475,7 @@ func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.atLeastOnceSem, c.atLeastOnceQ, c.atLeastOnceBlock)
+	return c.submitPersisted(packet, &c.atLeastOnce)
 }
 
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
@@ -488,7 +488,7 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.exactlyOnceSem, c.exactlyOnceQ, c.exactlyOnceBlock)
+	return c.submitPersisted(packet, &c.exactlyOnce)
 }
 
 // PublishExactlyOnceRetained is like PublishExactlyOnce, but the broker must
@@ -503,18 +503,18 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, c.exactlyOnceSem, c.exactlyOnceQ, c.exactlyOnceBlock)
+	return c.submitPersisted(packet, &c.exactlyOnce)
 }
 
-func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<- error, block chan holdup) (exchange <-chan error, err error) {
+func (c *Client) submitPersisted(packet net.Buffers, t *transfer) (exchange <-chan error, err error) {
 	select {
-	case seqNo, ok := <-sem:
+	case seqNo, ok := <-t.seqNoSem:
 		if !ok {
 			return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrClosed)
 		}
-		done, err := c.applySeqNoAndEnqueue(packet, seqNo, q)
+		done, err := c.applySeqNoAndEnqueue(packet, seqNo, t)
 		if err != nil {
-			sem <- seqNo // unlock
+			t.seqNoSem <- seqNo // unlock
 			return nil, err
 		}
 		err = c.writeBuffers(c.Offline(), packet)
@@ -523,26 +523,26 @@ func (c *Client) submitPersisted(packet net.Buffers, sem chan uint, q chan chan<
 			if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrDown) {
 				done <- fmt.Errorf("%w; PUBLISH request delayed", err)
 			}
-			block <- holdup{SinceSeqNo: seqNo, UntilSeqNo: seqNo}
+			t.block <- holdup{SinceSeqNo: seqNo, UntilSeqNo: seqNo}
 		} else {
-			sem <- seqNo + 1 // unlock
+			t.seqNoSem <- seqNo + 1 // unlock
 		}
 		return done, nil
 
-	case holdup := <-block:
-		done, err := c.applySeqNoAndEnqueue(packet, holdup.UntilSeqNo+1, q)
+	case holdup := <-t.block:
+		done, err := c.applySeqNoAndEnqueue(packet, holdup.UntilSeqNo+1, t)
 		if err != nil {
-			block <- holdup // unlock
+			t.block <- holdup // unlock
 			return nil, err
 		}
 		holdup.UntilSeqNo++
-		block <- holdup
+		t.block <- holdup
 		return done, nil
 	}
 }
 
-func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, q chan chan<- error) (done chan error, err error) {
-	if cap(q) == len(q) {
+func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, t *transfer) (done chan error, err error) {
+	if cap(t.q) == len(t.q) {
 		return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrMax)
 	}
 
@@ -559,7 +559,7 @@ func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, q chan cha
 	}
 
 	done = make(chan error, 2) // receives at most 1 write error + ErrClosed
-	q <- done                  // won't block due ErrMax check
+	t.q <- done                // won't block due ErrMax check
 	return done, nil
 }
 
@@ -606,7 +606,7 @@ func (c *Client) onPUBACK() error {
 		return errPacketIDSpace
 	case expect != packetID:
 		return fmt.Errorf("%w: PUBACK %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case len(c.atLeastOnceQ) == 0:
+	case len(c.atLeastOnce.q) == 0:
 		return fmt.Errorf("%w: PUBACK precedes PUBLISH", errProtoReset)
 	}
 
@@ -616,7 +616,7 @@ func (c *Client) onPUBACK() error {
 		return err // causes resubmission of PUBLISH
 	}
 	c.orderedTxs.Acked++
-	close(<-c.atLeastOnceQ)
+	close(<-c.atLeastOnce.q)
 	return nil
 }
 
@@ -637,7 +637,7 @@ func (c *Client) onPUBREC() error {
 		return errPacketIDSpace
 	case packetID != expect:
 		return fmt.Errorf("%w: PUBREC %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case int(c.Received-c.Completed) >= len(c.exactlyOnceQ):
+	case int(c.Received-c.Completed) >= len(c.exactlyOnce.q):
 		return fmt.Errorf("%w: PUBREC precedes PUBLISH", errProtoReset)
 	}
 
@@ -675,7 +675,7 @@ func (c *Client) onPUBCOMP() error {
 		return errPacketIDSpace
 	case packetID != expect:
 		return fmt.Errorf("%w: PUBCOMP %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case c.orderedTxs.Completed >= c.orderedTxs.Received || len(c.exactlyOnceQ) == 0:
+	case c.orderedTxs.Completed >= c.orderedTxs.Received || len(c.exactlyOnce.q) == 0:
 		return fmt.Errorf("%w: PUBCOMP precedes PUBREL", errProtoReset)
 	}
 
@@ -685,7 +685,7 @@ func (c *Client) onPUBCOMP() error {
 		return err // causes resubmission of PUBREL (from Persistence)
 	}
 	c.orderedTxs.Completed++
-	close(<-c.exactlyOnceQ)
+	close(<-c.exactlyOnce.q)
 	return nil
 }
 
@@ -814,10 +814,10 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	if len(atLeastOnceKeys) != 0 {
 		client.orderedTxs.Acked = atLeastOnceKeys[0] & publishIDMask
 		for range atLeastOnceKeys {
-			client.atLeastOnceQ <- make(chan<- error, 1) // won't block due Max check above
+			client.atLeastOnce.q <- make(chan<- error, 1) // won't block due Max check above
 		}
-		<-client.atLeastOnceSem
-		client.atLeastOnceBlock <- holdup{
+		<-client.atLeastOnce.seqNoSem
+		client.atLeastOnce.block <- holdup{
 			SinceSeqNo: atLeastOnceKeys[0],
 			UntilSeqNo: atLeastOnceKeys[len(atLeastOnceKeys)-1],
 		}
@@ -826,7 +826,7 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	if len(exactlyOnceKeys) != 0 {
 		client.orderedTxs.Completed = exactlyOnceKeys[0] & publishIDMask
 		for range exactlyOnceKeys {
-			client.exactlyOnceQ <- make(chan<- error, 1) // won't block due Max check above
+			client.exactlyOnce.q <- make(chan<- error, 1) // won't block due Max check above
 		}
 		var pubN int
 		for i, key := range exactlyOnceKeys {
@@ -842,11 +842,11 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		if client.orderedTxs.Received == 0 {
 			client.orderedTxs.Received = exactlyOnceKeys[len(exactlyOnceKeys)-1]&publishIDMask + 1
 		}
-		<-client.exactlyOnceSem
+		<-client.exactlyOnce.seqNoSem
 		if pubN == 0 {
-			client.exactlyOnceSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
+			client.exactlyOnce.seqNoSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
 		} else {
-			client.exactlyOnceBlock <- holdup{
+			client.exactlyOnce.block <- holdup{
 				SinceSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-pubN],
 				UntilSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-1],
 			}
