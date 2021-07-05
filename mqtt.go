@@ -3,7 +3,7 @@
 //
 // http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
 //
-// Publish and Disconnect do fire-and-forget submission. ErrClosed, ErrDown,
+// Publish and Disconnect do a fire-and-forget submission. ErrClosed, ErrDown,
 // ErrCanceled or an IsDeny [Publish only] imply no request submission. All
 // other errors imply that the request submission was interrupted by either a
 // connection failure or a PauseTimeout appliance.
@@ -15,10 +15,10 @@
 // errors imply that the request submission was interrupted by either a
 // connection failure or a PauseTimeout appliance.
 //
-// PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence
-// before network submission. Errors imply that the message was dropped: either
-// ErrClosed, ErrMax, Save failure and an IsDeny. Further errors are reported to
-// the respective exchange channel. None of them are fatal, including ErrClosed.
+// PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence.
+// Errors [either ErrClosed, ErrMax, Save failure or an IsDeny] imply that the
+// message was dropped. Once persisted, the client will execute the transfer
+// with endless retries, and report to the respective exchange channel.
 package mqtt
 
 import (
