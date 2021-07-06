@@ -131,10 +131,10 @@ func (c *Config) valid() error {
 		return fmt.Errorf("mqtt: illegal user name: %w", err)
 	}
 	if len(c.Password) > stringMax {
-		return fmt.Errorf("mqtt: password exceeds %d bytes", stringMax)
+		return fmt.Errorf("mqtt: illegal password: %w", errStringMax)
 	}
 	if len(c.Will.Message) > stringMax {
-		return fmt.Errorf("mqtt: will message exceeds %d bytes", stringMax)
+		return fmt.Errorf("mqtt: illegal will message: %w", errStringMax)
 	}
 
 	var err error
