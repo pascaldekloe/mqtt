@@ -86,14 +86,13 @@ const (
 // Validation errors are expected to be prefixed according to the context.
 var (
 	// ErrPacketMax enforces packetMax.
-	errPacketMax = errors.New("packet payload exceeds 256 MiB")
+	errPacketMax = errors.New("packet reached 256 MiB limit")
 	// ErrStringMax enforces stringMax.
-	errStringMax = errors.New("string exceeds 64 KiB")
+	errStringMax = errors.New("string reached 64 KiB limit")
 
 	errUTF8 = errors.New("invalid UTF-8 byte sequence")
 	errNull = errors.New("string contains null character")
-
-	errStringZero = errors.New("string is empty")
+	errZero = errors.New("string is empty")
 )
 
 // Validation errors are expected to be prefixed according to the context.
@@ -124,7 +123,7 @@ func stringCheck(s string) error {
 // — MQTT Version 3.1.1, conformance statement MQTT-4.7.3-1
 func topicCheck(s string) error {
 	if s == "" {
-		return errStringZero
+		return errZero
 	}
 	return stringCheck(s)
 }
@@ -136,7 +135,7 @@ func topicCheck(s string) error {
 func IsDeny(err error) bool {
 	for err != nil {
 		switch err {
-		case errPacketMax, errStringMax, errUTF8, errNull, errStringZero, errSubscribeNone, errUnsubscribeNone:
+		case errPacketMax, errStringMax, errUTF8, errNull, errZero, errSubscribeNone, errUnsubscribeNone:
 			return true
 		}
 		err = errors.Unwrap(err)
