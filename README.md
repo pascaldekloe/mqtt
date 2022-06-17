@@ -61,7 +61,8 @@ delivery alternatives.
 
 ## Command-Line Client
 
-Run `go install github.com/pascaldekloe/mqtt/cmd/mqttc` to build the binary.
+Run `go install github.com/pascaldekloe/mqtt/cmd/mqttc@latest` to build the
+binary.
 
 ```
 NAME
