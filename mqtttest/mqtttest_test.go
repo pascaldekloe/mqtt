@@ -1,7 +1,10 @@
 package mqtttest_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/pascaldekloe/mqtt"
 	"github.com/pascaldekloe/mqtt/mqtttest"
@@ -35,4 +38,22 @@ func TestSignatureMatch(t *testing.T) {
 	subscribe = mqtttest.NewSubscribeStub(nil)
 	unsubscribe = mqtttest.NewUnsubscribeMock(t)
 	unsubscribe = mqtttest.NewUnsubscribeStub(nil)
+}
+
+func ExampleNewPublishExchangeStub() {
+	PublishExchange := mqtttest.NewPublishExchangeStub(nil,
+		mqtttest.ExchangeBlock{Delay: time.Millisecond},
+		errors.New("test storage failure"),
+	)
+
+	exchange, err := PublishExchange([]byte("Hi!"), "announce")
+	if err != nil {
+		fmt.Println("publish error:", err)
+		return
+	}
+	for err := range exchange {
+		fmt.Println("exchange error:", err)
+	}
+	// Output:
+	// exchange error: test storage failure
 }
