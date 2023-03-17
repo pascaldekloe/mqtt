@@ -20,18 +20,21 @@ This is free and unencumbered software released into the
 
 ## Introduction
 
-The client supports confirmed message delivery with full progress disclosure.
-Message transfers without an confirmation can be as simple as the following.
+Client instantiation validates its configuration only. Network management itself
+operates from the *read routine*.
 
 ```go
-err := client.Publish(ctx.Done(), []byte("20.8℃"), "bedroom")
+client, err := mqtt.VolatileSession("demo-client", &mqtt.Config{
+	Dialer:       mqtt.NewDialer("tcp", "mq1.example.com:1883"),
+	PauseTimeout: 4 * time.Second,
+	CleanSession: true,
+})
 if err != nil {
-	log.Print("thermostat update lost: ", err)
-	return
+	log.Fatal("exit on broken setup: ", err)
 }
 ```
 
-A read routine sees inbound messages from any of the subscribed topics.
+A *read routine* sees inbound messages from any of the subscribed topics.
 
 ```go
 for {
@@ -54,8 +57,19 @@ for {
 }
 ```
 
-The [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
-from the package documentation provide more detail on error reporting and the
+The client supports confirmed message delivery with full progress disclosure.
+Message transfers without an confirmation can be as simple as the following.
+
+```go
+err := client.Publish(ctx.Done(), []byte("20.8℃"), "bedroom")
+if err != nil {
+	log.Print("thermostat update lost: ", err)
+	return
+}
+```
+
+See the [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
+from the package documentation for more detail on error reporting and the
 delivery alternatives.
 
 
