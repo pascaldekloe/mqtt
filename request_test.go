@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -250,13 +252,28 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 	<-brokerMockDone
 }
 
+// TestPublishAtLeastOnceRestart sends three messages as QOS 1 PUBLISH. The
+// broker simulation will do all of the following:
+//
+//  1. Receive the first message.
+//  2. Receive the second message.
+//  3. Acknowledge the first mesage.
+//  4. Partially receive the third message.
+//
+// Then the session is continued with a new client. It must automatically send
+// the second and the third message again.
 func TestPublishAtLeastOnceRestart(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir() // persistence location
 
-	p := mqtt.FileSystem(t.TempDir())
+	const publish1 = "3206000178800031"     // '1' (0x31) @ 'x' (0x78)
+	const publish2 = "3206000178800132"     // '2' (0x32) @ 'x' (0x78)
+	const publish3 = "3206000178800233"     // '3' (0x33) @ 'x' (0x78)
+	const publish2Dupe = "3a06000178800132" // with duplicate [DUP] flag
+	const publish3Dupe = "3a06000178800233" // with duplicate [DUP] flag
 
 	clientConn, brokerConn := net.Pipe()
-	client, err := mqtt.InitSession("test-client", p, &mqtt.Config{
+	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
 		Dialer:         newTestDialer(t, clientConn),
@@ -269,18 +286,9 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
 
 	brokerMockDone := testRoutine(t, func() {
-		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-			0x32, 6,
-			0, 1, 'x',
-			0x80, 0x00, // 1st packet identifier
-			'1'}))
-		wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-			0x32, 6,
-			0, 1, 'x',
-			0x80, 0x01, // 2nd packet identifier
-			'2'}))
-
-		sendPacketHex(t, brokerConn, "40028000") // SUBACK 1st
+		wantPacketHex(t, brokerConn, publish1)
+		wantPacketHex(t, brokerConn, publish2)
+		sendPacketHex(t, brokerConn, "40028000") // SUBACK № 1
 
 		var buf [1]byte
 		switch _, err := io.ReadFull(brokerConn, buf[:]); {
@@ -289,8 +297,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		case buf[0] != 0x32:
 			t.Errorf("want PUBLISH head 0x32, got %#x", buf[0])
 		}
-		// leave 3rd partial read
-
+		// leave № 3 partial read
 		err := client.Close()
 		if err != nil {
 			t.Error("Close error:", err)
@@ -299,24 +306,52 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 
 	ack1, err := client.PublishAtLeastOnce([]byte{'1'}, "x")
 	if err != nil {
-		t.Errorf("publish #1 got error %q [%T]", err, err)
+		t.Errorf("publish № 1 got error %q [%T]", err, err)
 	}
 	ack2, err := client.PublishAtLeastOnce([]byte{'2'}, "x")
 	if err != nil {
-		t.Errorf("publish #2 got error %q [%T]", err, err)
+		t.Errorf("publish № 2 got error %q [%T]", err, err)
 	}
 	ack3, err := client.PublishAtLeastOnce([]byte{'3'}, "x")
 	if err != nil {
-		t.Errorf("publish #3 got error %q [%T]", err, err)
+		t.Errorf("publish № 3 got error %q [%T]", err, err)
 	}
 	<-brokerMockDone
 	testAck(t, ack1)
 	testAckClosed(t, ack2)
 	testAckClosed(t, ack3)
 
+	// verify persistence; seals compatibility
+	publish2File := filepath.Join(dir, "08001") // named after it's packet ID
+	publish3File := filepath.Join(dir, "08002")
+	if bytes, err := os.ReadFile(publish2File); err != nil {
+		t.Error("publish № 2 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = publish2 + "0300000000000000" + "c0dcafa6"
+		if got != want {
+			t.Errorf("publish № 2 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+	if bytes, err := os.ReadFile(publish3File); err != nil {
+		t.Error("publish № 3 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = publish3 + "04000000000000000" + "5a75959"
+		if got != want {
+			t.Errorf("publish № 3 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+
+	if t.Failed() {
+		return
+	}
+
 	// continue with another Client
 	clientConn, brokerConn = net.Pipe()
-	client, warn, err := mqtt.AdoptSession(p, &mqtt.Config{
+	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
 		Dialer:         newTestDialer(t, clientConn),
@@ -330,18 +365,23 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	testClient(t, client)
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
-	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-		0x3a, 6, // with duplicate [DUP] flag
-		0, 1, 'x',
-		0x80, 0x01, // 2nd packet identifier
-		'2'}))
-	wantPacketHex(t, brokerConn, hex.EncodeToString([]byte{
-		0x3a, 6, // with duplicate [DUP] flag
-		0, 1, 'x',
-		0x80, 0x02, // 3rd packet identifier
-		'3'}))
-	sendPacketHex(t, brokerConn, "40028001") // SUBACK 2nd
-	sendPacketHex(t, brokerConn, "40028002") // SUBACK 3rd
+	wantPacketHex(t, brokerConn, publish2Dupe)
+	wantPacketHex(t, brokerConn, publish3Dupe)
+	sendPacketHex(t, brokerConn, "40028001") // SUBACK № 2
+	sendPacketHex(t, brokerConn, "40028002") // SUBACK № 3
+
+	// await SUBACK appliance
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(publish2File); err == nil {
+		t.Error("publish № 2 file exits after SUBACK", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 2 file error:", err)
+	}
+	if _, err := os.Stat(publish3File); err == nil {
+		t.Error("publish № 3 file exits after SUBACK", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 3 file error:", err)
+	}
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
