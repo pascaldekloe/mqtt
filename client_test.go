@@ -156,17 +156,17 @@ var errLastTestConn = errors.New("Dialer mock exhausted: all connections served"
 func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
 	t.Helper()
 
-	var dialN uint64
+	var dialN atomic.Uint64
 
 	t.Cleanup(func() {
-		n := atomic.LoadUint64(&dialN)
+		n := dialN.Load()
 		if n < uint64(len(conns)) && !t.Failed() {
 			t.Errorf("got only %d Dialer invocations for %d connection mocks", n, len(conns))
 		}
 	})
 
 	return func(context.Context) (net.Conn, error) {
-		n := atomic.AddUint64(&dialN, 1)
+		n := dialN.Add(1)
 		t.Log("Dial #", n)
 		if n > uint64(len(conns)) {
 			return nil, errLastTestConn

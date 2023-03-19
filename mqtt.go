@@ -392,7 +392,7 @@ type ruggedPersistence struct {
 
 	// Content is ordered based on this sequence number. The clientIDKey
 	// will have zero, as it is set [Save] only once as the first thing.
-	seqNo uint64
+	seqNo atomic.Uint64
 }
 
 // Load implements the Persistence interface.
@@ -413,7 +413,7 @@ func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
 
 // Save implements the Persistence interface.
 func (r *ruggedPersistence) Save(key uint, value net.Buffers) error {
-	return r.Persistence.Save(key, encodeValue(value, atomic.AddUint64(&r.seqNo, 1)))
+	return r.Persistence.Save(key, encodeValue(value, r.seqNo.Add(1)))
 }
 
 func encodeValue(packet net.Buffers, seqNo uint64) net.Buffers {
