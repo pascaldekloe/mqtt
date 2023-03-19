@@ -39,11 +39,19 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 		const readSlicesMax = 10
 		for n := 0; n < readSlicesMax; n++ {
 			message, topic, err := client.ReadSlices()
+
+			if err == errLastTestConn {
+				t.Log("backoff on:", err)
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+
 			if big := (*mqtt.BigMessage)(nil); errors.As(err, &big) {
-				t.Log("ReadSlices got BigMessage")
+				t.Log("got BigMessage")
 				topic = []byte(big.Topic)
 				message, err = big.ReadAll()
 			}
+
 			switch {
 			case err != nil:
 				switch {
@@ -54,7 +62,7 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 					return
 
 				case len(want) == 0:
-					t.Errorf("ReadSlices got error %q, want close", err)
+					t.Errorf("ReadSlices got error %q, want ErrClosed", err)
 				case want[0].Err == nil:
 					t.Errorf("ReadSlices got error %q, want message %#x @ %q", err, want[0].Message, want[0].Topic)
 				case !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error():
@@ -62,7 +70,7 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 				}
 
 			case len(want) == 0:
-				t.Errorf("ReadSlices got message %q @ %q, want close", message, topic)
+				t.Errorf("ReadSlices got message %q @ %q, want ErrClosed", message, topic)
 			case want[0].Err != nil:
 				t.Errorf("ReadSlices got message %#x @ %q, want error %q", message, topic, want[0].Err)
 			case !bytes.Equal(message, want[0].Message), string(topic) != want[0].Topic:
@@ -141,6 +149,8 @@ func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Clien
 	return client, brokerConns
 }
 
+var errLastTestConn = errors.New("Dialer mock exhausted: all connections served")
+
 // NewTestDialer returns a new dialer which returns the conns in order of
 // appearance. The test fails on fewer dials.
 func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
@@ -159,10 +169,7 @@ func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
 		n := atomic.AddUint64(&dialN, 1)
 		t.Log("Dial #", n)
 		if n > uint64(len(conns)) {
-			// send a blocking connection with some delay
-			block, _ := net.Pipe()
-			time.Sleep(time.Second / 16)
-			return block, nil
+			return nil, errLastTestConn
 		}
 		return conns[n-1], nil
 	}

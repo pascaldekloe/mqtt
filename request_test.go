@@ -445,7 +445,7 @@ func TestAbandon(t *testing.T) {
 func TestBreak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	client, conns := newClientPipeN(t, 2, mqtttest.Transfer{Err: io.EOF})
+	client, conn := newClientPipe(t, mqtttest.Transfer{Err: io.EOF})
 
 	pingDone := testRoutine(t, func() {
 		err := client.Ping(ctx.Done())
@@ -453,7 +453,7 @@ func TestBreak(t *testing.T) {
 			t.Errorf("ping got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
 	})
-	wantPacketHex(t, conns[0], "c000") // PINGREQ
+	wantPacketHex(t, conn, "c000") // PINGREQ
 
 	subscribeDone := testRoutine(t, func() {
 		err := client.Subscribe(ctx.Done(), "x")
@@ -461,7 +461,7 @@ func TestBreak(t *testing.T) {
 			t.Errorf("subscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
 	})
-	wantPacketHex(t, conns[0], "8206600000017802") // SUBSCRIBE
+	wantPacketHex(t, conn, "8206600000017802") // SUBSCRIBE
 
 	unsubscribeDone := testRoutine(t, func() {
 		err := client.Unsubscribe(ctx.Done(), "x")
@@ -469,9 +469,9 @@ func TestBreak(t *testing.T) {
 			t.Errorf("unsubscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
 	})
-	wantPacketHex(t, conns[0], "a2054001000178") // UNSUBSCRIBE
+	wantPacketHex(t, conn, "a2054001000178") // UNSUBSCRIBE
 
-	if err := conns[0].Close(); err != nil {
+	if err := conn.Close(); err != nil {
 		t.Error("broker mock got error on pipe close:", err)
 	}
 	<-pingDone
