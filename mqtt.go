@@ -293,9 +293,10 @@ func (m *volatile) List() (keys []uint, err error) {
 type fileSystem string
 
 // FileSystem stores values per file in a directory. Callers must ensure the
-// availability, including write permission for the user.
+// availability, including write permission for the user. The empty string
+// defaults to the working directory.
 func FileSystem(dir string) Persistence {
-	if dir == "" || dir[len(dir)-1] != os.PathSeparator {
+	if dir != "" && dir[len(dir)-1] != os.PathSeparator {
 		dir += string([]rune{os.PathSeparator})
 	}
 	return fileSystem(dir)
