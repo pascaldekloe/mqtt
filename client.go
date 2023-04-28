@@ -98,13 +98,13 @@ type Config struct {
 	AtLeastOnceMax, ExactlyOnceMax int
 
 	// The user name may be used by the broker for authentication and/or
-	// authorization purposes. An empty string omits the option, except
-	// for when password is not nil.
+	// authorization purposes. An empty string omits the option, except for
+	// when password is not nil.
 	UserName string
 	Password []byte // option omitted when nil
 
-	// The Will Message is published when the connection terminates
-	// without Disconnect. A nil Message disables the Will option.
+	// The Will Message is published when the connection terminates without
+	// Disconnect. A nil Message disables the Will option.
 	Will struct {
 		Topic   string // destination
 		Message []byte // payload
@@ -114,7 +114,10 @@ type Config struct {
 		ExactlyOnce bool // overrides AtLeastOnce
 	}
 
-	KeepAlive uint16 // timeout in seconds (disabled with zero)
+	// KeepAlive sets the activity timeout in seconds, with zero for none.
+	// The server must disconnect after no control-packet reception for one
+	// and a half times the keep-alive duration. Use Ping when idle.
+	KeepAlive uint16
 
 	// Brokers must resume communications with the client (identified by
 	// ClientID) when CleanSession is false. Otherwise, brokers must create
