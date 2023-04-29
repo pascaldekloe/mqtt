@@ -4,12 +4,12 @@
 
 MQTT is a protocol for message queueing over a network. This project provides a
 client library for the Go programming language. Message-delivery guarantees are
-maintained at all costs, even on (protocol, network or persistence) errors. The
-client recovers from errors atomatically. Message transfers in both directions
-do zero-copy.
+maintained at all costs, even when in error. The client recovers from failure
+with automatic reconnects. Message transfers in both directions do zero-copy.
 
-The development was kindly sponsored by [Northvolt](https://northvolt.com), as a
-gift to the open-source community.
+The development was kindly sponsored by [Northvolt](https://northvolt.com) as a
+gift to the open-source community. Many 🤖 navigated over unreliable connections
+since then.
 
 This is free and unencumbered software released into the
 [public domain](https://creativecommons.org/publicdomain/zero/1.0).
@@ -18,9 +18,9 @@ This is free and unencumbered software released into the
 [![Build Status](https://github.com/pascaldekloe/mqtt/actions/workflows/go.yml/badge.svg)](https://github.com/pascaldekloe/mqtt/actions/workflows/go.yml)
 
 
-## Introduction
+## Usage
 
-Client instantiation validates its configuration only. Network management itself
+Client instantiation validates the configuration only. Network management itself
 operates from the *read routine*.
 
 ```go
@@ -58,19 +58,17 @@ for {
 ```
 
 The client supports confirmed message delivery with full progress disclosure.
-Message transfers without an confirmation can be as simple as the following.
+Message transfers without confirmation can be as simple as the following.
 
 ```go
 err := client.Publish(ctx.Done(), []byte("20.8℃"), "bedroom")
 if err != nil {
 	log.Print("thermostat update lost: ", err)
-	return
 }
 ```
 
 See the [examples](https://pkg.go.dev/github.com/pascaldekloe/mqtt#pkg-examples)
-from the package documentation for more detail on error reporting and the
-delivery alternatives.
+from the package documentation for more detail.
 
 
 ## Command-Line Client
@@ -175,8 +173,8 @@ SEE ALSO
 
 The implementation follows version 3.1.1 of the
 [OASIS specification](http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html)
-in a strict manner. Support for the originating
-[IBM specification](https://public.dhe.ibm.com/software/dw/webservices/ws-mqtt/mqtt-v3r1.html)
+in a strict manner. Support for the original
+[IBM-specification](https://public.dhe.ibm.com/software/dw/webservices/ws-mqtt/mqtt-v3r1.html)
 may be added at some point in time.
 
 There are no plans to support protocol version 5. Version 3 is lean and well
@@ -184,4 +182,4 @@ suited for IOT. The additions in version 5 may be more of a fit for backend
 computing.
 
 See the [Broker wiki](https://github.com/pascaldekloe/mqtt/wiki/Brokers) for
-implementation specifics, AWS IoT users especially.
+implementation specifics, especially the AWS IoT users.

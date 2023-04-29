@@ -123,6 +123,8 @@ type Config struct {
 	// ClientID) when CleanSession is false. Otherwise, brokers must create
 	// a new session when either CleanSession is true or when no session is
 	// associated to the client identifier.
+	//
+	// Reconnects do not clean the session, regardless of this setting.
 	CleanSession bool
 }
 
@@ -222,7 +224,7 @@ func (c *Config) newCONNREQ(clientID []byte) []byte {
 // start in the Offline state. The (un)subscribe, publish and ping methods block
 // until the first connect attempt (from ReadSlices) completes. When the connect
 // attempt fails, then requests receive ErrDown until a retry succeeds. The same
-// goes for the automatic reconnects on connection loss.
+// goes for reconnects on connection loss.
 //
 // A single goroutine must invoke ReadSlices consecutively until ErrClosed. Some
 // backoff on error reception comes recommended though.
@@ -866,7 +868,7 @@ func (c *Client) connect() error {
 	c.writeSem <- conn
 	c.readConn = conn
 	c.r = r
-	c.peek = nil // applied to prevous r if any
+	c.peek = nil // applied to prevous r, if any
 
 	// Resend any pending PUBLISH and/or PUBREL entries from Persistence.
 	// The queues are locked because this runs within the read-routine and new
@@ -957,19 +959,23 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 }
 
 // ReadSlices should be invoked consecutively from a single goroutine until
-// ErrClosed. An IsDeny implies permantent Config rejection.
+// ErrClosed. Both message and topic are slices from a read buffer. The bytes
+// stop being valid at the next read. Care must be taken to avoid freezing the
+// Client. Use any of the following techniques for blocking operations.
 //
-// Both message and topic are slices from a read buffer. The bytes stop being
-// valid at the next read.
+//   - start a goroutine with a copy of message and/or topic
+//   - start a goroutine with the bytes parsed/unmarshalled
+//   - persist message and/or topic; then continue from there
+//   - apply low timeouts in a strict manner
 //
-// Each invocation acknowledges ownership of the previously returned if any.
-// Alternatively, use either Disconnect or Close to prevent a confirmation from
-// being send.
+// Each invocation acknowledges ownership of the previous returned, if any,
+// including BigMessage.
 //
-// BigMessage leaves the memory allocation choice to the consumer. Any other
-// error puts the Client in an ErrDown state. Invocation should apply a backoff
-// once down. Retries on IsConnectionRefused, if any, should probably apply a
-// rather large backoff. See the Client example for a complete setup.
+// BigMessage leaves memory allocation beyond the read buffer as a choice to the
+// consumer. Any error other than BigMessage puts the Client in an ErrDown state.
+// Invocation should apply a backoff once down. Retries on IsConnectionRefused,
+// if any, should probably apply a rather large backoff. See the Client example
+// for a complete setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	message, topic, err = c.readSlices()
 	switch {

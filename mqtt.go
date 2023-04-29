@@ -4,19 +4,19 @@
 // http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
 //
 // Publish and Disconnect do a fire-and-forget submission. ErrClosed, ErrDown,
-// ErrCanceled or an IsDeny [Publish only] imply no request submission. All
-// other errors imply that the request submission was interrupted by either a
-// connection failure or a PauseTimeout appliance.
+// ErrCanceled or an IsDeny [Publish only] imply no request submission. Any
+// other error implies that the request submission was interrupted by either a
+// connection failure or a by PauseTimeout appliance.
 //
 // Ping, Subscribe and Unsubscribe await response from the broker. ErrClosed,
 // ErrDown, ErrMax, ErrCanceled or an IsDeny [Subscribe and Unsubscribe only]
 // imply no request submission. ErrBreak and ErrAbandoned leave with the broker
 // response unknown. Subscribe responses may cause an SubscribeError. All other
 // errors imply that the request submission was interrupted by either a
-// connection failure or a PauseTimeout appliance.
+// connection failure or by a PauseTimeout appliance.
 //
 // PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence.
-// Errors [either ErrClosed, ErrMax, Save failure or an IsDeny] imply that the
+// Errors [either ErrClosed, ErrMax, IsDeny, or a Save return] imply that the
 // message was dropped. Once persisted, the client will execute the transfer
 // with endless retries, and report to the respective exchange channel.
 package mqtt
@@ -129,7 +129,7 @@ func topicCheck(s string) error {
 }
 
 // IsDeny returns whether execution was rejected by the Client based on some
-// validation constraint, like size limitation or an illegal UTF-8 encoding.
+// validation constraint, like a size limitation or an illegal UTF-8 encoding.
 // The rejection is permanent in such case. Another invocation with the same
 // arguments will result in the same error again.
 func IsDeny(err error) bool {

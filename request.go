@@ -210,14 +210,14 @@ func (c *Client) Subscribe(quit <-chan struct{}, topicFilters ...string) error {
 	return c.subscribeLevel(quit, topicFilters, exactlyOnceLevel)
 }
 
-// SubscribeLimitAtMostOnce is like Subscribe, but limits the message reception
-// to quality-of-service level 0: fire-and-forget.
+// SubscribeLimitAtMostOnce is like Subscribe, but it limits message reception
+// to quality-of-service level 0—fire and forget.
 func (c *Client) SubscribeLimitAtMostOnce(quit <-chan struct{}, topicFilters ...string) error {
 	return c.subscribeLevel(quit, topicFilters, atMostOnceLevel)
 }
 
-// SubscribeLimitAtLeastOnce is like Subscribe, but limits the message reception
-// to quality-of-service level 1: acknowledged transfer.
+// SubscribeLimitAtLeastOnce is like Subscribe, but it limits message reception
+// to quality-of-service level 1—acknowledged transfer.
 func (c *Client) SubscribeLimitAtLeastOnce(quit <-chan struct{}, topicFilters ...string) error {
 	return c.subscribeLevel(quit, topicFilters, atLeastOnceLevel)
 }
@@ -431,7 +431,7 @@ func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) err
 	return c.writeBuffers(quit, packet)
 }
 
-// PublishRetained is like Publish, but the broker should store the message, so
+// PublishRetained is like Publish, but the broker must store the message, so
 // that it can be delivered to future subscribers whose subscriptions match the
 // topic name. The broker may choose to discard the message at any time though.
 // Uppon reception, the broker must discard any message previously retained for
@@ -704,6 +704,9 @@ func InitSession(clientID string, p Persistence, c *Config) (*Client, error) {
 // Brokers use clientID to uniquely identify the session. Volatile sessions may
 // be continued by using the same clientID again. Use CleanSession to prevent
 // reuse of an existing state.
+//
+// An error implies either a broken setup or persistence failure. Connection
+// issues, if any, are reported by ReadSlices.
 func VolatileSession(clientID string, c *Config) (*Client, error) {
 	return initSession(clientID, newVolatile(), c)
 }
@@ -735,6 +738,10 @@ func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
 }
 
 // AdoptSession continues with a Persistence which had an InitSession already.
+//
+// A fatal implies either a broken setup or persistence failure. Connection
+// issues, if any, are reported by ReadSlices. The Client recovers from corrupt
+// states (in Persistence) automatically with warn entries.
 func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal error) {
 	if err := c.valid(); err != nil {
 		return nil, warn, err
