@@ -83,19 +83,17 @@ const (
 	stringMax = 1<<16 - 1 // 16-bit size prefixes
 )
 
-// Validation errors are expected to be prefixed according to the context.
 var (
 	// ErrPacketMax enforces packetMax.
-	errPacketMax = errors.New("packet reached 256 MiB limit")
+	errPacketMax = errors.New("mqtt: packet reached 256 MiB limit")
 	// ErrStringMax enforces stringMax.
-	errStringMax = errors.New("string reached 64 KiB limit")
+	errStringMax = errors.New("mqtt: string reached 64 KiB limit")
 
-	errUTF8 = errors.New("invalid UTF-8 byte sequence")
-	errNull = errors.New("string contains null character")
-	errZero = errors.New("string is empty")
+	errUTF8 = errors.New("mqtt: invalid UTF-8 byte sequence")
+	errNull = errors.New("mqtt: string contains null character")
+	errZero = errors.New("mqtt: string is empty")
 )
 
-// Validation errors are expected to be prefixed according to the context.
 func stringCheck(s string) error {
 	if len(s) > stringMax {
 		return errStringMax
@@ -325,28 +323,21 @@ func (dir fileSystem) Save(key uint, value net.Buffers) error {
 	if err != nil {
 		return err
 	}
-	// ⚠️ inverse error checks
 	_, err = value.WriteTo(f)
+	// ⚠️ inverse error checks
 	if err == nil {
 		err = f.Sync()
 	}
-	closeErr := f.Close()
-	if closeErr != nil {
-		if err == nil {
-			err = closeErr
-		} else {
-			err = fmt.Errorf("%w; file descriptor leak: %s", err, closeErr)
-		}
-	}
+	f.Close()
 	if err == nil {
 		err = os.Rename(f.Name(), dir.file(key))
 	}
 	if err == nil {
 		return nil // OK
 	}
-	removeErr := os.Remove(f.Name())
-	if removeErr != nil {
-		err = fmt.Errorf("%w; file leak: %s", err, removeErr)
+
+	if removeErr := os.Remove(f.Name()); removeErr != nil {
+		err = fmt.Errorf("%w, AND file leak: %w", err, removeErr)
 	}
 	return err
 }
@@ -399,17 +390,18 @@ type ruggedPersistence struct {
 // Load implements the Persistence interface.
 func (r *ruggedPersistence) Load(key uint) ([]byte, error) {
 	value, err := r.Persistence.Load(key)
-	if err != nil {
+	switch {
+	case err != nil:
 		return nil, err
-	}
-	if value == nil {
+	case value == nil:
 		return nil, nil
+	default:
+		value, _, err := decodeValue(value)
+		if err != nil {
+			return nil, fmt.Errorf("%w; record %#x unavailable", err, key)
+		}
+		return value, err
 	}
-	value, _, ok := decodeValue(value)
-	if !ok {
-		return nil, fmt.Errorf("mqtt: persistence value from key %#x corrupt", key)
-	}
-	return value, nil
 }
 
 // Save implements the Persistence interface.
@@ -429,14 +421,14 @@ func encodeValue(packet net.Buffers, seqNo uint64) net.Buffers {
 	return append(packet, buf[:])
 }
 
-func decodeValue(buf []byte) (packet []byte, seqNo uint64, ok bool) {
+func decodeValue(buf []byte) (packet []byte, seqNo uint64, _ error) {
 	if len(buf) < 12 {
-		return nil, 0, false
+		return nil, 0, errors.New("mqtt: persisted value truncated")
 	}
 	digest := fnv.New32a()
 	digest.Write(buf[:len(buf)-4])
 	if digest.Sum32() != binary.BigEndian.Uint32(buf[len(buf)-4:]) {
-		return nil, 0, false
+		return nil, 0, errors.New("mqtt: persisted value corrupt")
 	}
-	return buf[:len(buf)-12], binary.LittleEndian.Uint64(buf[len(buf)-12:]), true
+	return buf[:len(buf)-12], binary.LittleEndian.Uint64(buf[len(buf)-12:]), nil
 }

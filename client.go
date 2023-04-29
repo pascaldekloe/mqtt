@@ -133,13 +133,13 @@ func (c *Config) valid() error {
 		return errors.New("mqtt: no Dialer in Config")
 	}
 	if err := stringCheck(c.UserName); err != nil {
-		return fmt.Errorf("mqtt: illegal user name: %w", err)
+		return fmt.Errorf("%w; illegal user name", err)
 	}
 	if len(c.Password) > stringMax {
-		return fmt.Errorf("mqtt: illegal password: %w", errStringMax)
+		return fmt.Errorf("%w; illegal password", errStringMax)
 	}
 	if len(c.Will.Message) > stringMax {
-		return fmt.Errorf("mqtt: illegal will message: %w", errStringMax)
+		return fmt.Errorf("%w; illegal will message", errStringMax)
 	}
 
 	var err error
@@ -149,7 +149,7 @@ func (c *Config) valid() error {
 		err = stringCheck(c.Will.Topic)
 	}
 	if err != nil {
-		return fmt.Errorf("mqtt: illegal will topic: %w", err)
+		return fmt.Errorf("%w; illegal will topic", err)
 	}
 
 	return nil
@@ -408,7 +408,7 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 		return ErrClosed
 	}
 	if err != nil {
-		return fmt.Errorf("mqtt: DISCONNECT not send: %w", err)
+		return fmt.Errorf("%w; DISCONNECT not send", err)
 	}
 
 	// “After sending a DISCONNECT Packet the Client MUST NOT send

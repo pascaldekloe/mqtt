@@ -229,12 +229,12 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	size := 2 + len(topicFilters)*3
 	for _, s := range topicFilters {
 		if err := topicCheck(s); err != nil {
-			return fmt.Errorf("mqtt: SUBSCRIBE request denied on topic filter: %w", err)
+			return fmt.Errorf("%w; SUBSCRIBE request denied on topic filter", err)
 		}
 		size += len(s)
 	}
 	if size > packetMax {
-		return fmt.Errorf("mqtt: SUBSCRIBE request denied: %w", errPacketMax)
+		return fmt.Errorf("%w; SUBSCRIBE request denied", errPacketMax)
 	}
 
 	// slot assignment
@@ -339,11 +339,11 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	for _, s := range topicFilters {
 		size += len(s)
 		if err := topicCheck(s); err != nil {
-			return fmt.Errorf("mqtt: UNSUBSCRIBE request denied on topic filter: %w", err)
+			return fmt.Errorf("%w; UNSUBSCRIBE request denied on topic filter", err)
 		}
 	}
 	if size > packetMax {
-		return fmt.Errorf("mqtt: UNSUBSCRIBE request denied: %w", errPacketMax)
+		return fmt.Errorf("%w; UNSUBSCRIBE request denied", errPacketMax)
 	}
 
 	// slot assignment
@@ -565,14 +565,14 @@ func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, t *transfe
 
 func publishPacket(buf *[bufSize]byte, message []byte, topic string, packetID uint, head byte) (net.Buffers, error) {
 	if err := topicCheck(topic); err != nil {
-		return nil, fmt.Errorf("mqtt: PUBLISH request denied due topic: %w", err)
+		return nil, fmt.Errorf("%w; PUBLISH request denied on topic", err)
 	}
 	size := 2 + len(topic) + len(message)
 	if packetID != 0 {
 		size += 2
 	}
 	if size < 0 || size > packetMax {
-		return nil, fmt.Errorf("mqtt: PUBLISH request denied: %w", errPacketMax)
+		return nil, fmt.Errorf("%w; PUBLISH request denied", errPacketMax)
 	}
 
 	packet := append(buf[:0], head)
@@ -713,7 +713,7 @@ func VolatileSession(clientID string, c *Config) (*Client, error) {
 
 func initSession(clientID string, p Persistence, c *Config) (*Client, error) {
 	if err := stringCheck(clientID); err != nil {
-		return nil, fmt.Errorf("mqtt: illegal client identifier: %w", err)
+		return nil, fmt.Errorf("%w; illegal client identifier", err)
 	}
 	if err := c.valid(); err != nil {
 		return nil, err
@@ -765,13 +765,13 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 			return nil, warn, err
 		}
 
-		switch packet, seqNo, ok := decodeValue(value); {
-		case !ok:
-			err := p.Delete(key)
-			if err != nil {
-				warn = append(warn, fmt.Errorf("mqtt: corrupt persistence record %#x not deleted: %w", key, err))
+		switch packet, seqNo, err := decodeValue(value); {
+		case err != nil:
+			delErr := p.Delete(key)
+			if delErr != nil {
+				warn = append(warn, fmt.Errorf("%w; record %#x not deleted: %w", err, key, delErr))
 			} else {
-				warn = append(warn, fmt.Errorf("mqtt: corrupt persistence record %#x deleted", key))
+				warn = append(warn, fmt.Errorf("%w; record %#x deleted", err, key))
 			}
 
 		case len(packet) == 0:
