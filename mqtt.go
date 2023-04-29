@@ -29,8 +29,10 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 // Control packets have a 4-bit type code in the first byte.
@@ -98,22 +100,24 @@ func stringCheck(s string) error {
 	if len(s) > stringMax {
 		return errStringMax
 	}
-	for _, r := range s {
-		switch r {
-		// “The character data in a UTF-8 encoded string MUST be
-		// well-formed UTF-8 as defined by the Unicode specification
-		// and restated in RFC 3629.”
-		// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-1
-		case '\uFFFD':
-			return errUTF8
 
-		// “A UTF-8 encoded string MUST NOT include an encoding of the
-		// null character U+0000.”
-		// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-2
-		case 0:
-			return errNull
-		}
+	// “The character data in a UTF-8 encoded string MUST be well-formed
+	// UTF-8 as defined by the Unicode specification and restated in RFC
+	// 3629.”
+	if !utf8.ValidString(s) {
+		return errUTF8
 	}
+
+	// “A UTF-8 encoded string MUST NOT include an encoding of the null
+	// character U+0000.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-1.5.3-2
+	if strings.IndexByte(s, 0) >= 0 {
+		return errNull
+	}
+
+	// Characters 0x01–0x1F, 0x7F–0x9F, and the code points defined in the
+	// Unicode specification to be non-characters are all tolerated, yet the
+	// receiver may decide otherwise, and it may close the connection.
 	return nil
 }
 
