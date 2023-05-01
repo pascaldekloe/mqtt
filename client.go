@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -242,65 +241,64 @@ type Client struct {
 
 	// The read routine controls the connection, including reconnects.
 	readConn net.Conn
-	r        *bufio.Reader // conn buffered
+	bufr     *bufio.Reader // readConn buffered
 	peek     []byte        // pending slice from bufio.Reader
 
+	// Context is applied durring connect for faster aborts.
+	ctx    context.Context
+	cancel context.CancelFunc // Close may cancel the context
+
 	// The semaphore locks connection control. A nil entry implies no
-	// successful connect yet.
+	// connect yet. ConnSem must be held to close writeSem.
 	connSem chan net.Conn
 
-	// The context is fed to Dialer for fast aborts during a Close.
-	dialCtx    context.Context
-	dialCancel context.CancelFunc
-
-	// Write operations have four states:
-	// * pending (re)connect with a .writeBlock entry
-	// * connected with a non nil .connSem entry
-	// * ErrDown (after a failed connect) with a nil .connSem entry
-	// * ErrClosed with writeSem closed
-
-	// The semaphore allows for ordered output, as required by the protocol.
+	// Writes may happen from multiple goroutines. The semaphore contains
+	// either a signal placeholder or the active connection. A connPending
+	// entry signals a first (re)connect attempt, and connDown signals a
+	// failed (re)connect attempt
 	writeSem chan net.Conn
-	// Writes signal the block channel on fatal errors, leaving writeSem
-	// empty/locked. The connection must be closed (if it wasn't already).
-	writeBlock chan struct{}
 
 	// The semaphore allows for one ping request at a time.
 	pingAck chan chan<- error
 
-	atLeastOnce, exactlyOnce transfer
+	atLeastOnce, exactlyOnce outbound
 
+	// outbound transaction tracking
 	orderedTxs
 	unorderedTxs
 
-	// The read routine sends its content on the next ReadSlices.
-	pendingAck []byte
+	pendingAck []byte // enqueued packet submission
 
 	// The read routine parks reception beyond readBufSize.
 	bigMessage *BigMessage
 }
 
-// Transfer holds state of an outbound exchange-type.
-type transfer struct {
-	// The semaphore locks q with a submission counter.
-	// Overflows are permitted.
-	seqNoSem chan uint
+// Outbound submission may face multiple goroutines.
+type outbound struct {
+	seqSem chan seq // sequence semaphore singleton
 
-	// Acknowledgement is traced by a callback channel.
+	// Acknowledgement is traced with a callback channel.
+	// Insertion requires seqSem. Close requires connSem.
 	q chan chan<- error
+}
 
-	// Submissions signal the block channel on errors,
-	// while leaving seqNoSem empty/locked.
-	block chan holdup
+// Sequence tracks outbound submission.
+type seq struct {
+	// Sequence number n applies to the next submission, starting with zero.
+	// Its value is used to calculate the respective MQTT packet identifier.
+	n uint
+
+	// When backlog is less than n, then packets since backlog until n - 1
+	// await submission. This may happen during connection absence.
+	backlog uint
 }
 
 func newClient(p Persistence, config *Config) *Client {
-	// need 1 packet identifier free to determine the first and last entry
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
-		config.AtLeastOnceMax = publishIDMask
+		config.AtLeastOnceMax = publishIDMask + 1
 	}
 	if config.ExactlyOnceMax < 0 || config.ExactlyOnceMax > publishIDMask {
-		config.ExactlyOnceMax = publishIDMask
+		config.ExactlyOnceMax = publishIDMask + 1
 	}
 
 	c := &Client{
@@ -310,17 +308,14 @@ func newClient(p Persistence, config *Config) *Client {
 		offlineSig:  make(chan chan struct{}, 1),
 		connSem:     make(chan net.Conn, 1),
 		writeSem:    make(chan net.Conn, 1),
-		writeBlock:  make(chan struct{}, 1),
 		pingAck:     make(chan chan<- error, 1),
-		atLeastOnce: transfer{
-			seqNoSem: make(chan uint, 1),
-			q:        make(chan chan<- error, config.AtLeastOnceMax),
-			block:    make(chan holdup, 1),
+		atLeastOnce: outbound{
+			seqSem: make(chan seq, 1),
+			q:      make(chan chan<- error, config.AtLeastOnceMax),
 		},
-		exactlyOnce: transfer{
-			seqNoSem: make(chan uint, 1),
-			q:        make(chan chan<- error, config.ExactlyOnceMax),
-			block:    make(chan holdup, 1),
+		exactlyOnce: outbound{
+			seqSem: make(chan seq, 1),
+			q:      make(chan chan<- error, config.ExactlyOnceMax),
 		},
 		unorderedTxs: unorderedTxs{
 			perPacketID: make(map[uint16]unorderedCallback),
@@ -328,69 +323,58 @@ func newClient(p Persistence, config *Config) *Client {
 	}
 
 	// start in offline state
-	c.onlineSig <- make(chan struct{})
+	c.onlineSig <- make(chan struct{}) // blocks
 	released := make(chan struct{})
 	close(released)
 	c.offlineSig <- released
 
 	c.connSem <- nil
-	c.dialCtx, c.dialCancel = context.WithCancel(context.Background())
-	c.writeBlock <- struct{}{}
-	c.atLeastOnce.seqNoSem <- 0
-	c.exactlyOnce.seqNoSem <- 0
+	c.writeSem <- connPending
+
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.atLeastOnce.seqSem <- seq{backlog: ^uint(0)}
+	c.exactlyOnce.seqSem <- seq{backlog: ^uint(0)}
 	return c
-}
-
-// TermConn hijacks connection access. Further connect, write and writeBuffers
-// requests are denied with ErrClosed, regardless of the error return.
-func (c *Client) termConn(quit <-chan struct{}) (net.Conn, error) {
-	// terminate connection control
-	c.dialCancel()
-	conn, ok := <-c.connSem
-	if !ok {
-		return nil, ErrClosed
-	}
-	close(c.connSem)
-
-	// terminate write operations
-	defer close(c.writeSem)
-	select {
-	case <-c.writeBlock:
-		return nil, ErrDown
-
-	case conn := <-c.writeSem:
-		if conn == nil {
-			return nil, ErrDown
-		}
-		return conn, nil
-
-	case <-quit:
-		if conn != nil {
-			conn.Close()
-		}
-		// connection closed now; writes won't block
-		select {
-		case <-c.writeSem:
-		case <-c.writeBlock:
-		}
-		return nil, ErrCanceled
-	}
 }
 
 // Close terminates the connection establishment.
 // The Client is closed regardless of the error return.
 // Closing an already closed Client has no effect.
 func (c *Client) Close() error {
-	quit := make(chan struct{})
-	close(quit) // no waiting
-	conn, err := c.termConn(quit)
-	switch err {
-	case nil:
-		err = conn.Close()
-	case ErrCanceled, ErrDown, ErrClosed:
-		err = nil
+	// halt context (interrupts dial & connect)
+	c.cancel()
+
+	// block connection control
+	conn, ok := <-c.connSem
+	if !ok {
+		// allready closed
+		return nil
 	}
-	return err
+	defer func() {
+		// signal offline
+		blockSignalChan(c.onlineSig)
+		clearSignalChan(c.offlineSig)
+		// signal closed
+		close(c.writeSem)
+		close(c.connSem)
+	}()
+
+	// block write, close connection
+	select {
+	case conn = <-c.writeSem:
+		switch conn {
+		case connPending, connDown:
+			return nil // already offline
+		}
+		return conn.Close()
+	default: // no wait for write
+		var err error
+		if conn != nil {
+			err = conn.Close() // may interrupt write
+		}
+		<-c.writeSem // won't block for long now
+		return err
+	}
 }
 
 // Disconnect tries a graceful termination, which discards the Will.
@@ -403,23 +387,48 @@ func (c *Client) Close() error {
 // disconnect request. As a result, a client can never know for sure
 // whether the operation actually succeeded.
 func (c *Client) Disconnect(quit <-chan struct{}) error {
-	conn, err := c.termConn(quit)
-	if err == ErrClosed {
-		return ErrClosed
-	}
-	if err != nil {
-		return fmt.Errorf("%w; DISCONNECT not send", err)
-	}
+	// halt context (interrupts dial & connect)
+	c.cancel()
 
-	// “After sending a DISCONNECT Packet the Client MUST NOT send
-	// any more Control Packets on that Network Connection.”
-	// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
-	writeErr := write(conn, packetDISCONNECT, c.PauseTimeout)
-	closeErr := conn.Close()
-	if writeErr != nil {
-		return writeErr
+	// block connection control
+	conn, ok := <-c.connSem
+	if !ok {
+		return fmt.Errorf("%w; DISCONNECT not send", ErrClosed)
 	}
-	return closeErr
+	defer func() {
+		// signal offline
+		blockSignalChan(c.onlineSig)
+		clearSignalChan(c.offlineSig)
+		// signal closed
+		close(c.writeSem)
+		close(c.connSem)
+	}()
+
+	// block write, send disconnect, close connection
+	select {
+	case <-quit:
+		if conn != nil {
+			conn.Close() // may interrupt write
+		}
+		<-c.writeSem // won't block for long now
+		return fmt.Errorf("%w; DISCONNECT not send", ErrCanceled)
+
+	case conn = <-c.writeSem:
+		switch conn {
+		case connPending, connDown:
+			return fmt.Errorf("%w; DISCONNECT not send", ErrDown)
+		}
+
+		// “After sending a DISCONNECT Packet the Client MUST NOT send
+		// any more Control Packets on that Network Connection.”
+		// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
+		writeErr := write(conn, packetDISCONNECT, c.PauseTimeout)
+		closeErr := conn.Close()
+		if writeErr != nil {
+			return fmt.Errorf("%w; DISCONNECT lost", writeErr)
+		}
+		return closeErr
+	}
 }
 
 func (c *Client) termCallbacks() {
@@ -429,23 +438,17 @@ func (c *Client) termCallbacks() {
 	go func() {
 		defer wg.Done()
 
-		select {
-		case _, ok := <-c.atLeastOnce.seqNoSem:
-			if !ok { // already terminated
-				return
-			}
-		case <-c.atLeastOnce.block:
+		_, ok := <-c.atLeastOnce.seqSem
+		if !ok { // already terminated
+			return
 		}
-		close(c.atLeastOnce.seqNoSem) // terminate
+		close(c.atLeastOnce.seqSem) // terminate
 
 		// flush queue
 		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
 		close(c.atLeastOnce.q)
 		for ch := range c.atLeastOnce.q {
-			select {
-			case ch <- err:
-			default: // won't block
-			}
+			ch <- err // won't block
 		}
 	}()
 
@@ -453,31 +456,23 @@ func (c *Client) termCallbacks() {
 	go func() {
 		defer wg.Done()
 
-		select {
-		case _, ok := <-c.exactlyOnce.seqNoSem:
-			if !ok { // already terminated
-				return
-			}
-		case <-c.exactlyOnce.block:
+		_, ok := <-c.exactlyOnce.seqSem
+		if !ok { // already terminated
+			return
 		}
-		close(c.exactlyOnce.seqNoSem) // terminate
+		close(c.exactlyOnce.seqSem) // terminate
 
 		// flush queue
 		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
 		close(c.exactlyOnce.q)
 		for ch := range c.exactlyOnce.q {
-			select {
-			case ch <- err:
-			default: // won't block
-			}
+			ch <- err // won't block
 		}
 	}()
 
 	select {
-	case ack, ok := <-c.pingAck:
-		if ok {
-			ack <- fmt.Errorf("%w; PING not confirmed", ErrBreak)
-		}
+	case ack := <-c.pingAck:
+		ack <- fmt.Errorf("%w; PING not confirmed", ErrBreak)
 	default:
 		break
 	}
@@ -500,55 +495,49 @@ func (c *Client) Offline() <-chan struct{} {
 	return ch
 }
 
-func (c *Client) toOnline() {
-	on := <-c.onlineSig
+func clearSignalChan(ch chan chan struct{}) {
+	sig := <-ch
 	select {
-	case <-on:
+	case <-sig:
 		break // released already
 	default:
-		close(on)
+		close(sig) // release
 	}
-	c.onlineSig <- on
+	ch <- sig
+}
 
-	off := <-c.offlineSig
+func blockSignalChan(ch chan chan struct{}) {
+	sig := <-ch
 	select {
-	case <-off:
-		c.offlineSig <- make(chan struct{})
+	case <-sig:
+		ch <- make(chan struct{}) // block
 	default:
-		c.offlineSig <- off
+		ch <- sig // blocks already
 	}
 }
 
 func (c *Client) toOffline() {
 	select {
-	case conn := <-c.writeSem:
-		if conn != nil {
-			conn.Close()
+	case _, ok := <-c.writeSem:
+		if !ok {
+			return // ErrClosed
 		}
-	case <-c.writeBlock:
-		// A write detected the problem in the mean time.
-		// The signal implies that the connection was closed.
-		break
+		c.readConn.Close()
+	default:
+		c.readConn.Close() // interrupt write
+		_, ok := <-c.writeSem
+		if !ok {
+			return // ErrClosed
+		}
 	}
-	c.writeBlock <- struct{}{}
+	blockSignalChan(c.onlineSig)
+	clearSignalChan(c.offlineSig)
+	c.writeSem <- connPending
+
 	c.readConn = nil
-
-	off := <-c.offlineSig
-	select {
-	case <-off:
-		break // released already
-	default:
-		close(off)
-	}
-	c.offlineSig <- off
-
-	on := <-c.onlineSig
-	select {
-	case <-on:
-		c.onlineSig <- make(chan struct{})
-	default:
-		c.onlineSig <- on
-	}
+	c.bigMessage = nil // lost
+	c.bufr = nil
+	c.peek = nil // applied to prevous r, if any
 
 	select {
 	case ack := <-c.pingAck:
@@ -556,72 +545,123 @@ func (c *Client) toOffline() {
 	default:
 		break
 	}
+
 	c.unorderedTxs.breakAll()
 }
 
+// LockWrite acquires the write semaphore.
 func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
-	select {
-	case <-quit:
-		return nil, ErrCanceled
-	case conn, ok := <-c.writeSem: // locks writes
-		if !ok {
-			return nil, ErrClosed
+	var checkConnect *time.Ticker
+
+	for {
+		select {
+		case <-quit:
+			return nil, ErrCanceled
+		case conn, ok := <-c.writeSem: // lock
+			switch {
+			case !ok:
+				return nil, ErrClosed
+			case conn == connDown:
+				c.writeSem <- connDown // unlock
+				return nil, ErrDown
+			case conn == connPending:
+				c.writeSem <- connPending // unlock
+				break
+			default:
+				return conn, nil
+			}
+
+			if checkConnect == nil {
+				checkConnect = time.NewTicker(20 * time.Millisecond)
+				defer checkConnect.Stop()
+			}
+			select {
+			case <-c.ctx.Done():
+				return nil, ErrClosed
+			case <-c.Online():
+				break // connect succeeded
+			case <-checkConnect.C:
+				break // connect may have failed
+			}
 		}
-		if conn == nil {
-			c.writeSem <- nil // unlocks writes
-			return nil, ErrDown
-		}
-		return conn, nil
 	}
 }
 
 // Write submits the packet. Keep synchronised with writeBuffers!
 func (c *Client) write(quit <-chan struct{}, p []byte) error {
-	for {
-		conn, err := c.lockWrite(quit)
-		if err != nil {
-			return err
-		}
+	conn, err := c.lockWrite(quit)
+	if err != nil {
+		return err
+	}
 
-		switch err := write(conn, p, c.PauseTimeout); {
-		case err == nil:
-			c.writeSem <- conn // unlocks writes
-			return nil
+	switch err := write(conn, p, c.PauseTimeout); {
+	case err == nil:
+		c.writeSem <- conn // unlock write
+		return nil
 
-		case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
-			// got interrupted; read routine will determine next course
-			c.writeBlock <- struct{}{} // parks writes
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		// read routine closed the connection
+		c.writeSem <- connPending // unlock write; pending connect
+		return fmt.Errorf("mqtt: submission interupted: %w", err)
 
-		default:
-			conn.Close()               // interrupts read routine
-			c.writeBlock <- struct{}{} // parks writes
-			return err
-		}
+	default:
+		conn.Close()              // signal read routine
+		c.writeSem <- connPending // unlock write; pending connect
+		return err
 	}
 }
 
 // WriteBuffers submits the packet. Keep synchronised with write!
 func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
-	for {
-		conn, err := c.lockWrite(quit)
-		if err != nil {
-			return err
-		}
+	conn, err := c.lockWrite(quit)
+	if err != nil {
+		return err
+	}
 
-		switch err := writeBuffers(conn, p, c.PauseTimeout); {
-		case err == nil:
-			c.writeSem <- conn // unlocks writes
-			return nil
+	switch err := writeBuffers(conn, p, c.PauseTimeout); {
+	case err == nil:
+		c.writeSem <- conn // unlock write
+		return nil
 
-		case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
-			// got interrupted; read routine will determine next course
-			c.writeBlock <- struct{}{} // parks writes
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		// read routine closed the connection
+		c.writeSem <- connPending // unlock write; pending connect
+		return fmt.Errorf("mqtt: submission interupted: %w", err)
 
-		default:
-			conn.Close()               // interrupts read routine
-			c.writeBlock <- struct{}{} // parks writes
-			return err
-		}
+	default:
+		conn.Close()              // signal read routine
+		c.writeSem <- connPending // unlock write; pending connect
+		return err
+	}
+}
+
+// WriteBuffersNoWait does not wait for pending connects.
+func (c *Client) writeBuffersNoWait(p net.Buffers) error {
+	// lock write
+	conn, ok := <-c.writeSem
+	switch {
+	case !ok:
+		return ErrClosed
+	case conn == connDown, conn == connPending:
+		c.writeSem <- conn // unlock
+		return ErrDown
+	}
+
+	// transfer
+	switch err := writeBuffers(conn, p, c.PauseTimeout); {
+	case err == nil:
+		c.writeSem <- conn // unlock write
+		return nil
+
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		// read routine closed the connection
+		c.writeSem <- connPending // unlock write; pending connect
+		return fmt.Errorf("mqtt: submission interupted: %w", err)
+
+	default:
+		conn.Close()              // signal read routine
+		c.writeSem <- connPending // unlock write; pending connect
+		return err
 	}
 }
 
@@ -641,9 +681,11 @@ func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 			}
 		}
 		n, err := conn.Write(p)
-		if err == nil { // OK
+		// ⚠️ reverse error check
+		if err == nil {
 			return nil
 		}
+
 		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
 		if n == 0 || !errors.As(err, &ne) || !ne.Timeout() {
@@ -670,9 +712,11 @@ func writeBuffers(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error
 			}
 		}
 		n, err := p.WriteTo(conn)
-		if err == nil { // OK
+		// ⚠️ reverse error check
+		if err == nil {
 			return nil
 		}
+
 		// Allow deadline expiry if at least one byte was transferred.
 		var ne net.Error
 		if n == 0 || !errors.As(err, &ne) || !ne.Timeout() {
@@ -696,7 +740,7 @@ func writeBuffers(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error
 
 // PeekPacket slices a packet payload from the read buffer into c.peek.
 func (c *Client) peekPacket() (head byte, err error) {
-	head, err = c.r.ReadByte()
+	head, err = c.bufr.ReadByte()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			err = errBrokerTerm
@@ -713,13 +757,13 @@ func (c *Client) peekPacket() (head byte, err error) {
 	// decode “remaining length”
 	var size int
 	for shift := uint(0); ; shift += 7 {
-		if c.r.Buffered() == 0 && c.PauseTimeout != 0 {
+		if c.bufr.Buffered() == 0 && c.PauseTimeout != 0 {
 			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 			if err != nil {
 				return 0, err // deemed critical
 			}
 		}
-		b, err := c.r.ReadByte()
+		b, err := c.bufr.ReadByte()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				err = io.ErrUnexpectedEOF
@@ -737,7 +781,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 
 	// slice payload form read buffer
 	for {
-		if c.r.Buffered() < size {
+		if c.bufr.Buffered() < size {
 			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 			if err != nil {
 				return 0, err // deemed critical
@@ -745,7 +789,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 		}
 
 		lastN := len(c.peek)
-		c.peek, err = c.r.Peek(size)
+		c.peek, err = c.bufr.Peek(size)
 		switch {
 		case err == nil: // OK
 			return head, err
@@ -766,159 +810,160 @@ func (c *Client) peekPacket() (head byte, err error) {
 	}
 }
 
-// Connect installs the transport layer. The current
-// connection must be closed in case of a reconnect.
+// Connect installs the transport layer.
+//
+// The current connection must be closed in case of a reconnect.
 func (c *Client) connect() error {
-	clientID, err := c.persistence.Load(clientIDKey)
-	if err != nil {
-		return err
-	}
-	packet := c.newCONNREQ(clientID)
-
-	<-c.Offline() // extra verification
-
-	oldConn, ok := <-c.connSem // locks connection control
+	previousConn, ok := <-c.connSem // locks connection control
 	if !ok {
 		return ErrClosed
 	}
 	// No need for further closed channel checks as the
-	// connsem lock is required to close any of them.
+	// connSem lock is required to close any of them.
 
-	select { // locks write
-	case <-c.writeSem:
-	case <-c.writeBlock:
-	}
-
-	var atLeastOnceSeqNo, exactlyOnceSeqNo uint
-	select { // locks publish submission
-	case atLeastOnceSeqNo = <-c.atLeastOnce.seqNoSem:
-		break
-	case holdup := <-c.atLeastOnce.block:
-		atLeastOnceSeqNo = holdup.UntilSeqNo + 1
-	}
-	select { // locks publish submission
-	case exactlyOnceSeqNo = <-c.exactlyOnce.seqNoSem:
-		break
-	case holdup := <-c.exactlyOnce.block:
-		exactlyOnceSeqNo = holdup.UntilSeqNo + 1
-	}
-
+	config := c.Config // copy
 	// Reconnects shouldn't reset the session.
-	if oldConn != nil && c.CleanSession {
-		c.CleanSession = false
+	if previousConn != nil {
+		config.CleanSession = false
 	}
-	ctx := c.dialCtx
+	conn, bufr, err := c.dialAndConnect(&config)
+	switch err {
+	case nil:
+		break
+
+	case context.Canceled:
+		// Close or Disconnect interrupted dial
+		c.connSem <- previousConn // unlock
+		return ErrClosed
+
+	default:
+		// ErrDown after failed connect
+		<-c.writeSem
+		c.writeSem <- connDown
+
+		c.connSem <- previousConn // unlock
+		return err
+	}
+
+	// lock sequences until resubmission (checks) complete
+	atLeastOnceSeq := <-c.atLeastOnce.seqSem
+	exactlyOnceSeq := <-c.exactlyOnce.seqSem
+
+	// lock write in sequence locks, conform submitPersisted
+	<-c.writeSem
+
+	c.connSem <- conn // unlock (for interruption of resends)
+
+	err = c.resend(conn, c.orderedTxs.Acked, &atLeastOnceSeq, atLeastOnceIDSpace)
+	c.atLeastOnce.seqSem <- atLeastOnceSeq // unlock
+	if err != nil {
+		c.exactlyOnce.seqSem <- exactlyOnceSeq // unlock
+		conn.Close()
+		c.writeSem <- connDown
+		return err
+	}
+	err = c.resend(conn, c.orderedTxs.Completed, &exactlyOnceSeq, exactlyOnceIDSpace)
+	c.exactlyOnce.seqSem <- exactlyOnceSeq // unlock
+	if err != nil {
+		conn.Close()
+		c.writeSem <- connDown
+		return err
+	}
+
+	// update signals
+	blockSignalChan(c.offlineSig)
+	clearSignalChan(c.onlineSig)
+	// release
+	c.writeSem <- conn
+	c.readConn = conn
+	c.bufr = bufr
+	return nil
+}
+
+func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error) {
+	// connect request packet
+	clientID, err := c.persistence.Load(clientIDKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	packet := config.newCONNREQ(clientID)
+
+	// network connection
+	ctx := c.ctx
 	if c.PauseTimeout != 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(c.dialCtx, c.PauseTimeout)
+		ctx, cancel = context.WithTimeout(ctx, c.PauseTimeout)
 		defer cancel()
 	}
 	conn, err := c.Dialer(ctx)
 	if err != nil {
-		c.connSem <- oldConn // unlock for next attempt
-		c.writeSem <- nil    // causes ErrDown
-		n := uint(len(c.atLeastOnce.q))
-		if n == 0 {
-			c.atLeastOnce.seqNoSem <- atLeastOnceSeqNo
-		} else {
-			c.atLeastOnce.block <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
+		if e := c.ctx.Err(); e != nil {
+			return nil, nil, e
 		}
-		n = uint(len(c.exactlyOnce.q))
-		if n == 0 {
-			c.exactlyOnce.seqNoSem <- exactlyOnceSeqNo
-		} else {
-			c.exactlyOnce.block <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
-		}
-
-		// FIXME(pascaldekloe): Error string matching is supported
-		// according to <https://github.com/golang/go/issues/36208>.
-		if strings.Contains(err.Error(), "operation was canceled") {
-			return ErrClosed
-		}
-		return err
+		return nil, nil, err
 	}
 	// “After a Network Connection is established by a Client to a Server,
 	// the first Packet sent from the Client to the Server MUST be a CONNECT
 	// Packet.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
 
-	c.connSem <- conn // release early for interruption by Close
+	// Don't make Close wait on a slow connect.
+	done := make(chan struct{})
+	defer close(done)
+	abort := make(chan error, 1)
+	go func() {
+		defer close(abort)
+		select {
+		case <-c.ctx.Done():
+			conn.Close() // interrupt
+			abort <- ErrClosed
+		case <-done:
+			break
+		}
+	}()
 
-	r, err := c.handshake(conn, packet)
+	bufr, err := c.handshake(conn, packet)
+	// ⚠️ delayed error check
+
+	done <- struct{}{}
+	e := <-abort
+	if e != nil {
+		// abort closed connection
+		return nil, nil, e
+	}
+
 	if err != nil {
-		conn.Close()      // abandon
-		c.writeSem <- nil // causes ErrDown
-		if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
-			// connSem entry closed
-			err = ErrClosed
-		}
-		n := uint(len(c.atLeastOnce.q))
-		if n == 0 {
-			c.atLeastOnce.seqNoSem <- atLeastOnceSeqNo
-		} else {
-			c.atLeastOnce.block <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
-		}
-		n = uint(len(c.exactlyOnce.q))
-		if n == 0 {
-			c.exactlyOnce.seqNoSem <- exactlyOnceSeqNo
-		} else {
-			c.exactlyOnce.block <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
-		}
-		return err
+		conn.Close()
+		return nil, nil, err
 	}
-
-	c.toOnline()
-	// install connection
-	c.writeSem <- conn
-	c.readConn = conn
-	c.r = r
-	c.peek = nil // applied to prevous r, if any
-
-	// Resend any pending PUBLISH and/or PUBREL entries from Persistence.
-	// The queues are locked because this runs within the read-routine and new
-	// submission requires either the sequence number semaphore or a holdup block.
-	if n := uint(len(c.atLeastOnce.q)); n != 0 {
-		err := c.resendPublishPackets(atLeastOnceSeqNo-n, atLeastOnceSeqNo-1, atLeastOnceIDSpace)
-		if err != nil {
-			c.toOffline()
-			c.atLeastOnce.block <- holdup{atLeastOnceSeqNo - n, atLeastOnceSeqNo - 1}
-			n = uint(len(c.exactlyOnce.q))
-			c.exactlyOnce.block <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
-			return err
-		}
-	}
-	c.atLeastOnce.seqNoSem <- atLeastOnceSeqNo
-	if n := uint(len(c.exactlyOnce.q)); n != 0 {
-		err := c.resendPublishPackets(exactlyOnceSeqNo-n, exactlyOnceSeqNo-1, exactlyOnceIDSpace)
-		if err != nil {
-			c.toOffline()
-			c.exactlyOnce.block <- holdup{exactlyOnceSeqNo - n, exactlyOnceSeqNo - 1}
-			return err
-		}
-	}
-	c.exactlyOnce.seqNoSem <- exactlyOnceSeqNo
-
-	return nil
+	return conn, bufr, nil
 }
 
-func (c *Client) resendPublishPackets(firstSeqNo, lastSeqNo uint, space uint) error {
-	for seqNo := firstSeqNo; seqNo <= lastSeqNo; seqNo++ {
+// Resend submits any and all pending since seqNoOffset.
+func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) error {
+	for seqNo := seqNoOffset; seqNo < seq.n; seqNo++ {
 		key := seqNo&publishIDMask | space
-		packet, err := c.persistence.Load(key)
+		packet, err := c.persistence.Load(uint(key))
 		if err != nil {
 			return err
 		}
-		if len(packet) == 0 {
+		if packet == nil {
 			return fmt.Errorf("mqtt: persistence key %#04x gone missing 👻", key)
 		}
-		if packet[0]>>4 == typePUBLISH {
+
+		if seqNo < seq.backlog && packet[0]>>4 == typePUBLISH {
 			packet[0] |= dupeFlag
 		}
-		err = c.write(nil, packet)
+
+		err = write(conn, packet, c.PauseTimeout)
 		if err != nil {
 			return err
 		}
+		if seqNo >= seq.backlog {
+			seq.backlog = seqNo + 1
+		}
 	}
+
 	return nil
 }
 
@@ -944,8 +989,6 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.2.0-1
 	packet, err := r.Peek(4)
 	switch {
-	case c.dialCtx.Err() != nil:
-		err = ErrClosed
 	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
 		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
 	case len(packet) > 3 && connectReturn(packet[3]) != accepted:
@@ -992,28 +1035,26 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 }
 
 func (c *Client) readSlices() (message, topic []byte, err error) {
-	// A pending BigMessage implies that the connection was functional on
-	// the last return.
-	switch {
-	case c.bigMessage != nil:
-		<-c.Online() // extra verification
-		_, err = c.r.Discard(c.bigMessage.Size)
+	if c.readConn == nil {
+		if err = c.connect(); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if c.bigMessage != nil {
+		_, err = c.bufr.Discard(c.bigMessage.Size)
 		if err != nil {
 			c.toOffline()
 			return nil, nil, err
 		}
 
-	case c.readConn == nil:
-		if err := c.connect(); err != nil {
-			return nil, nil, err
-		}
-		<-c.Online() // extra verification
+		c.bigMessage = nil
+	}
 
-	default:
-		<-c.Online() // extra verification
+	if pending := len(c.peek); pending != 0 {
 		// skip previous packet, if any
-		c.r.Discard(len(c.peek)) // no errors guaranteed
-		c.peek = nil             // flush
+		c.bufr.Discard(pending) // no error guaranteed
+		c.peek = nil            // clear
 	}
 
 	// acknowledge previous packet, if any
@@ -1031,8 +1072,10 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 		}
 		err := c.write(nil, c.pendingAck)
 		if err != nil {
+			c.toOffline()
 			return nil, nil, err // keeps pendingAck to retry
 		}
+
 		c.pendingAck = c.pendingAck[:0]
 	}
 
@@ -1044,13 +1087,11 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 			break
 
 		case errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe):
-			// got interrupted
+			// closed by either Close, Disconnect, or failed write
 			c.toOffline()
 			if err := c.connect(); err != nil {
-				c.readConn = nil
 				return nil, nil, err
 			}
-
 			continue // with new connection
 
 		case errors.As(err, &c.bigMessage):
@@ -1058,16 +1099,13 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 				message, topic, err = c.onPUBLISH(head)
 				// TODO(pascaldekloe): errDupe
 				if err != nil {
-					// If the packet is malformed then
-					// BigMessage is not the issue anymore.
-					c.bigMessage = nil
 					c.toOffline()
 					return nil, nil, err
 				}
 				c.bigMessage.Topic = string(topic) // copy
 				done := readBufSize - len(message)
 				c.bigMessage.Size -= done
-				c.r.Discard(done) // no errors guaranteed
+				c.bufr.Discard(done) // no errors guaranteed
 			}
 			c.peek = nil
 			return nil, nil, c.bigMessage
@@ -1123,7 +1161,7 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 		}
 
 		// no errors guaranteed
-		c.r.Discard(len(c.peek))
+		c.bufr.Discard(len(c.peek))
 	}
 }
 
@@ -1151,9 +1189,8 @@ func (e *BigMessage) ReadAll() ([]byte, error) {
 	e.bigMessage = nil
 
 	message := make([]byte, e.Size)
-	_, err := io.ReadFull(e.Client.r, message)
+	_, err := io.ReadFull(e.Client.bufr, message)
 	if err != nil {
-		e.Client.toOffline()
 		return nil, err
 	}
 	return message, nil
@@ -1240,3 +1277,23 @@ func (c *Client) onPUBREL() error {
 	c.pendingAck = c.pendingAck[:0]
 	return nil
 }
+
+// The write semaphore may hold a connSignal when not connected.
+const (
+	connPending connSignal = iota // first (re)connect attempt.
+	connDown                      // failed (re)connect attempt.
+)
+
+// ConnSignal is a net.Conn.
+type connSignal int
+
+const connSignalInvoke = "signal invoked as connection"
+
+func (c connSignal) Read(b []byte) (n int, err error) { panic(connSignalInvoke) }
+func (c connSignal) Write(b []byte) (int, error)      { panic(connSignalInvoke) }
+func (c connSignal) Close() error                     { panic(connSignalInvoke) }
+func (c connSignal) LocalAddr() net.Addr              { panic(connSignalInvoke) }
+func (c connSignal) RemoteAddr() net.Addr             { panic(connSignalInvoke) }
+func (c connSignal) SetDeadline(time.Time) error      { panic(connSignalInvoke) }
+func (c connSignal) SetReadDeadline(time.Time) error  { panic(connSignalInvoke) }
+func (c connSignal) SetWriteDeadline(time.Time) error { panic(connSignalInvoke) }

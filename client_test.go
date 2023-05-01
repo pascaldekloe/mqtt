@@ -7,8 +7,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,9 +17,24 @@ import (
 
 // TestClient reads the client with assertions and timeouts.
 func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
-	timeoutDone := make(chan struct{})
-	timeout := time.AfterFunc(2*time.Second, func() {
-		defer close(timeoutDone)
+	// extra offline state check
+	select {
+	case <-client.Online():
+		t.Fatal("online signal receive before ReadSlices")
+	default:
+		break
+	}
+	select {
+	case <-client.Offline():
+		break
+	default:
+		t.Fatal("offline signal blocked before ReadSlices")
+	}
+
+	timeoutOver := make(chan struct{})
+	timeout := time.AfterFunc(30*time.Second, func() {
+		defer close(timeoutOver)
+
 		t.Error("test timeout; closing Client now…")
 		err := client.Close()
 		if err != nil {
@@ -32,7 +45,7 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 	readRoutineDone := testRoutine(t, func() {
 		defer func() {
 			if timeout.Stop() {
-				close(timeoutDone)
+				close(timeoutOver)
 			}
 		}()
 
@@ -40,47 +53,53 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 		for n := 0; n < readSlicesMax; n++ {
 			message, topic, err := client.ReadSlices()
 
-			if err == errLastTestConn {
+			if errors.Is(err, errLastTestConn) {
 				t.Log("backoff on:", err)
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 
-			if big := (*mqtt.BigMessage)(nil); errors.As(err, &big) {
+			if errors.Is(err, mqtt.ErrClosed) {
+				for i := range want {
+					if want[i].Err != nil {
+						t.Errorf("client closed, want ReadSlices error: %v", want[i].Err)
+					} else {
+						t.Errorf("client closed, want ReadSlices message %#.1000x @ %q", want[i].Message, want[i].Topic)
+					}
+				}
+
+				return
+			}
+
+			if len(want) == 0 {
+				t.Errorf("ReadSlices got message %q, topic %q, and error %q, want ErrClosed", message, topic, err)
+				continue
+			}
+
+			var big *mqtt.BigMessage
+			if errors.As(err, &big) {
 				t.Log("got BigMessage")
 				topic = []byte(big.Topic)
 				message, err = big.ReadAll()
 			}
 
-			switch {
-			case err != nil:
-				switch {
-				case errors.Is(err, mqtt.ErrClosed):
-					if len(want) != 0 {
-						t.Errorf("client closed, want %d more ReadSlices", len(want))
-					}
-					return
-
-				case len(want) == 0:
-					t.Errorf("ReadSlices got error %q, want ErrClosed", err)
-				case want[0].Err == nil:
-					t.Errorf("ReadSlices got error %q, want message %#x @ %q", err, want[0].Message, want[0].Topic)
-				case !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error():
+			if err != nil {
+				if want[0].Err == nil {
+					t.Errorf("ReadSlices got error %q, want message %#.200x @ %q", err, want[0].Message, want[0].Topic)
+				} else if !errors.Is(err, want[0].Err) && err.Error() != want[0].Err.Error() {
 					t.Errorf("ReadSlices got error %q, want errors.Is %q", err, want[0].Err)
 				}
-
-			case len(want) == 0:
-				t.Errorf("ReadSlices got message %q @ %q, want ErrClosed", message, topic)
-			case want[0].Err != nil:
-				t.Errorf("ReadSlices got message %#x @ %q, want error %q", message, topic, want[0].Err)
-			case !bytes.Equal(message, want[0].Message), string(topic) != want[0].Topic:
-				t.Errorf("got message %#x @ %q, want %#x @ %q", message, topic, want[0].Message, want[0].Topic)
+			} else {
+				if want[0].Err != nil {
+					t.Errorf("ReadSlices got message %#.200x @ %q, want error %q", message, topic, want[0].Err)
+				} else if !bytes.Equal(message, want[0].Message) || string(topic) != want[0].Topic {
+					t.Errorf("ReadSlices got message %#.200x @ %q, want %#.200x @ %q", message, topic, want[0].Message, want[0].Topic)
+				}
 			}
 
-			if len(want) != 0 {
-				want = want[1:] // move to next in line
-			}
+			want = want[1:] // move to next in line
 		}
+
 		t.Errorf("test abort after %d ReadSlices", readSlicesMax)
 	})
 
@@ -90,10 +109,11 @@ func testClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 			t.Error("client close error:", err)
 		}
 
+		// no routine leaks
 		<-readRoutineDone
-		<-timeoutDone
+		<-timeoutOver
 
-		// verify closed state
+		// extra offline state check
 		select {
 		case <-client.Online():
 			t.Error("online signal receive after client close")
@@ -125,10 +145,14 @@ func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Clien
 	// This type of test is slow in general.
 	t.Parallel()
 
+	// expire I/O mocks before tests time out
+	brokerDeadline := time.Now().Add(800 * time.Millisecond)
+
 	clientConns := make([]net.Conn, n)
 	brokerConns := make([]net.Conn, n)
 	for i := range clientConns {
 		clientConns[i], brokerConns[i] = net.Pipe()
+		brokerConns[i].SetDeadline(brokerDeadline)
 	}
 
 	client, err := mqtt.VolatileSession("", &mqtt.Config{
@@ -161,7 +185,7 @@ func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
 	t.Cleanup(func() {
 		n := dialN.Load()
 		if n < uint64(len(conns)) && !t.Failed() {
-			t.Errorf("got only %d Dialer invocations for %d connection mocks", n, len(conns))
+			t.Errorf("got %d Dialer invocations, want %d", n, len(conns))
 		}
 	})
 
@@ -177,8 +201,9 @@ func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
 
 func TestClose(t *testing.T) {
 	client, err := mqtt.VolatileSession("test-client", &mqtt.Config{
-		Dialer: func(context.Context) (net.Conn, error) {
-			return nil, errors.New("dialer invoked")
+		Dialer: func(ctx context.Context) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
 		},
 		PauseTimeout: time.Second / 2,
 	})
@@ -201,19 +226,15 @@ func TestClose(t *testing.T) {
 		t.Error("offline signal blocked on initial state")
 	}
 
-	// Close before ReadSlices (connects). Race because we can. ™️
-	var wg sync.WaitGroup
+	// Race because we can. ™️
 	for n := 0; n < 3; n++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			err := client.Close()
 			if err != nil {
 				t.Error("got close error:", err)
 			}
 		}()
 	}
-	wg.Wait()
 
 	_, _, err = client.ReadSlices()
 	if !errors.Is(err, mqtt.ErrClosed) {
@@ -403,10 +424,14 @@ func TestReceivePublishAtLeastOnceBig(t *testing.T) {
 
 	_, conn := newClientPipe(t, mqtttest.Transfer{Message: bytes.Repeat([]byte{'A'}, bigN), Topic: "bam"})
 
-	sendPacketHex(t, conn, hex.EncodeToString([]byte{
-		0x32, 0x87, 0x80, 0x10,
-		0, 3, 'b', 'a', 'm',
-		0xab, 0xcd})+strings.Repeat("41", bigN))
+	sendPacketHex(t, conn, "32"+ // publish at least once
+		"878010"+ // size varint 7 + bigN
+		"000362616d"+ // topic
+		"abcd") // packet identifier
+	_, err := conn.Write(bytes.Repeat([]byte{'A'}, bigN))
+	if err != nil {
+		t.Fatal("payload submission error:", err)
+	}
 	wantPacketHex(t, conn, "4002abcd") // PUBACK
 }
 

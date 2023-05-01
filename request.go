@@ -410,11 +410,6 @@ type orderedTxs struct {
 	Completed uint // confirm count 2/2 for PublishExactlyOnce
 }
 
-type holdup struct {
-	SinceSeqNo uint // oldest entry
-	UntilSeqNo uint // latest entry
-}
-
 // Publish delivers the message with an “at most once” guarantee.
 // Subscribers may or may not receive the message when subject to error.
 // This delivery method is the most efficient option.
@@ -506,43 +501,47 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (excha
 	return c.submitPersisted(packet, &c.exactlyOnce)
 }
 
-func (c *Client) submitPersisted(packet net.Buffers, t *transfer) (exchange <-chan error, err error) {
-	select {
-	case seqNo, ok := <-t.seqNoSem:
-		if !ok {
-			return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrClosed)
-		}
-		done, err := c.applySeqNoAndEnqueue(packet, seqNo, t)
-		if err != nil {
-			t.seqNoSem <- seqNo // unlock
-			return nil, err
-		}
-		err = c.writeBuffers(c.Offline(), packet)
-		if err != nil {
-			// don't report down
-			if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrDown) {
-				done <- fmt.Errorf("%w; PUBLISH request delayed", err)
-			}
-			t.block <- holdup{SinceSeqNo: seqNo, UntilSeqNo: seqNo}
-		} else {
-			t.seqNoSem <- seqNo + 1 // unlock
-		}
-		return done, nil
-
-	case holdup := <-t.block:
-		done, err := c.applySeqNoAndEnqueue(packet, holdup.UntilSeqNo+1, t)
-		if err != nil {
-			t.block <- holdup // unlock
-			return nil, err
-		}
-		holdup.UntilSeqNo++
-		t.block <- holdup
-		return done, nil
+func (c *Client) submitPersisted(packet net.Buffers, out *outbound) (exchange <-chan error, err error) {
+	// lock sequence
+	seq, ok := <-out.seqSem
+	if !ok {
+		return nil, ErrClosed
 	}
+	defer func() {
+		out.seqSem <- seq // unlock
+	}()
+
+	// persist
+	done, err := c.applySeqNoAndEnqueue(packet, seq.n, out)
+	if err != nil {
+		return nil, err
+	}
+	seq.n++
+
+	// submit
+	if seq.backlog < seq.n {
+		// buffered channel won't block
+		done <- fmt.Errorf("%w; PUBLISH enqueued", ErrDown)
+	} else {
+
+		err = c.writeBuffersNoWait(packet)
+		if err != nil {
+			// start backlog
+			seq.backlog = seq.n
+			if err == ErrDown {
+				seq.backlog--
+			}
+
+			// buffered channel won't block
+			done <- fmt.Errorf("%w; PUBLISH enqueued", err)
+		}
+	}
+
+	return done, nil
 }
 
-func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, t *transfer) (done chan error, err error) {
-	if cap(t.q) == len(t.q) {
+func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, out *outbound) (done chan error, err error) {
+	if cap(out.q) == len(out.q) {
 		return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrMax)
 	}
 
@@ -559,7 +558,7 @@ func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, t *transfe
 	}
 
 	done = make(chan error, 2) // receives at most 1 write error + ErrClosed
-	t.q <- done                // won't block due ErrMax check
+	out.q <- done              // won't block due ErrMax check
 	return done, nil
 }
 
@@ -752,10 +751,14 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		return nil, warn, err
 	}
 
-	// collect local packet identifiers
-	seqNos := make(seqNos, 0, len(keys))
-	keyPerSeqNo := make(map[uint64]uint, len(keys))
-	PUBRELPerKey := make(map[uint][]byte)
+	// storage includes a sequence number
+	storeOrderPerKey := make(map[uint]uint64, len(keys))
+
+	// “When a Client reconnects with CleanSession set to 0, both the Client
+	// and Server MUST re-send any unacknowledged PUBLISH Packets (where QoS
+	// > 0) and PUBREL Packets using their original Packet Identifiers.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-4.4.0-1
+	var publishAtLeastOnceKeys, publishExactlyOnceKeys, publishReleaseKeys []uint
 	for _, key := range keys {
 		if key == clientIDKey || key&remoteIDKeyFlag != 0 {
 			continue
@@ -765,8 +768,8 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 			return nil, warn, err
 		}
 
-		switch packet, seqNo, err := decodeValue(value); {
-		case err != nil:
+		packet, storageSeqNo, err := decodeValue(value)
+		if err != nil {
 			delErr := p.Delete(key)
 			if delErr != nil {
 				warn = append(warn, fmt.Errorf("%w; record %#x not deleted: %w", err, key, delErr))
@@ -774,132 +777,125 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 				warn = append(warn, fmt.Errorf("%w; record %#x deleted", err, key))
 			}
 
-		case len(packet) == 0:
-			err := p.Delete(key)
-			if err != nil {
-				warn = append(warn, fmt.Errorf("mqtt: somehow empty persistence record %#x not deleted: %w", key, err))
-			} else {
-				warn = append(warn, fmt.Errorf("mqtt: somehow empty persistence record %#x deleted", key))
-			}
+			continue
+		}
 
-		default:
-			seqNos = append(seqNos, seqNo)
-			keyPerSeqNo[seqNo] = key
-			if packet[0]>>4 == typePUBREL {
-				PUBRELPerKey[key] = packet
+		storeOrderPerKey[key] = storageSeqNo
+
+		switch packet[0] >> 4 {
+		case typePUBLISH:
+			switch key &^ publishIDMask {
+			case atLeastOnceIDSpace:
+				publishAtLeastOnceKeys = append(publishAtLeastOnceKeys, key)
+			case exactlyOnceIDSpace:
+				publishExactlyOnceKeys = append(publishExactlyOnceKeys, key)
 			}
+		case typePUBREL:
+			publishReleaseKeys = append(publishReleaseKeys, key)
 		}
 	}
 
-	var atLeastOnceKeys, exactlyOnceKeys []uint
-	sort.Sort(seqNos)
-	for _, seqNo := range seqNos {
-		key := keyPerSeqNo[seqNo]
-		switch key &^ publishIDMask {
-		case atLeastOnceIDSpace:
-			atLeastOnceKeys = append(atLeastOnceKeys, key)
-		case exactlyOnceIDSpace:
-			exactlyOnceKeys = append(exactlyOnceKeys, key)
+	// sort by persistence sequence number
+	sort.Slice(publishAtLeastOnceKeys, func(i, j int) (less bool) {
+		return storeOrderPerKey[publishAtLeastOnceKeys[i]] < storeOrderPerKey[publishAtLeastOnceKeys[j]]
+	})
+	sort.Slice(publishExactlyOnceKeys, func(i, j int) (less bool) {
+		return storeOrderPerKey[publishExactlyOnceKeys[i]] < storeOrderPerKey[publishExactlyOnceKeys[j]]
+	})
+	sort.Slice(publishReleaseKeys, func(i, j int) (less bool) {
+		return storeOrderPerKey[publishReleaseKeys[i]] < storeOrderPerKey[publishReleaseKeys[j]]
+	})
+	// verify continuous sequence
+	publishAtLeastOnceKeys = cleanSequence(publishAtLeastOnceKeys, "PUBLISH at-least-once", &warn)
+	publishExactlyOnceKeys = cleanSequence(publishExactlyOnceKeys, "PUBLISH exactly-once", &warn)
+	publishReleaseKeys = cleanSequence(publishReleaseKeys, "PUBREL", &warn)
+	if len(publishExactlyOnceKeys) != 0 && len(publishReleaseKeys) != 0 {
+		n := publishExactlyOnceKeys[0] & publishIDMask
+		p := publishReleaseKeys[len(publishReleaseKeys)-1] & publishIDMask
+		if n-p != 1 && !(n == 0 && p == publishIDMask) {
+			warn = append(warn, fmt.Errorf("mqtt: PUBREL %#x–%#x dropped ☠️ due gap until PUBLISH %#x",
+				publishReleaseKeys[0], publishReleaseKeys[len(publishReleaseKeys)-1], publishExactlyOnceKeys[0]))
 		}
 	}
-	atLeastOnceKeys = cleanSeq(atLeastOnceKeys, "at-least-once", p, &warn)
-	exactlyOnceKeys = cleanSeq(exactlyOnceKeys, "exactly-once", p, &warn)
 
-	switch {
-	case len(atLeastOnceKeys) > c.AtLeastOnceMax:
-		return nil, warn, fmt.Errorf("mqtt: %d AtLeastOnceMax is less than %d pending from Persistence", c.AtLeastOnceMax, len(atLeastOnceKeys))
-	case len(exactlyOnceKeys) > c.ExactlyOnceMax:
-		return nil, warn, fmt.Errorf("mqtt: %d ExactlyOnceMax is less than %d pending from Persistence", c.ExactlyOnceMax, len(exactlyOnceKeys))
+	// instantiate client
+	if n := len(publishAtLeastOnceKeys); n > c.AtLeastOnceMax {
+		return nil, warn, fmt.Errorf("mqtt: %d AtLeastOnceMax is less than the %d pending in session", c.AtLeastOnceMax, n)
+	}
+	if n := len(publishExactlyOnceKeys) + len(publishReleaseKeys); n > c.ExactlyOnceMax {
+		return nil, warn, fmt.Errorf("mqtt: %d ExactlyOnceMax is less than the %d pending in session", c.ExactlyOnceMax, n)
 	}
 	client = newClient(&ruggedPersistence{Persistence: p}, c)
 
-	// “When a Client reconnects with CleanSession set to 0, both the Client
-	// and Server MUST re-send any unacknowledged PUBLISH Packets (where QoS
-	// > 0) and PUBREL Packets using their original Packet Identifiers.”
-	// — MQTT Version 3.1.1, conformance statement MQTT-4.4.0-1
-
-	if len(atLeastOnceKeys) != 0 {
-		client.orderedTxs.Acked = atLeastOnceKeys[0] & publishIDMask
-		for range atLeastOnceKeys {
-			client.atLeastOnce.q <- make(chan<- error, 1) // won't block due Max check above
+	// install at-least-once sequence counters
+	if keys = publishAtLeastOnceKeys; len(keys) != 0 {
+		client.orderedTxs.Acked = keys[0] & publishIDMask
+		last := keys[len(keys)-1] & publishIDMask
+		if last < client.orderedTxs.Acked {
+			// pending range overflows address space
+			last += publishIDMask + 1
 		}
-		<-client.atLeastOnce.seqNoSem
-		client.atLeastOnce.block <- holdup{
-			SinceSeqNo: atLeastOnceKeys[0],
-			UntilSeqNo: atLeastOnceKeys[len(atLeastOnceKeys)-1],
-		}
+		seq := <-client.atLeastOnce.seqSem
+		seq.n = last + 1
+		client.atLeastOnce.seqSem <- seq
 	}
 
-	if len(exactlyOnceKeys) != 0 {
-		client.orderedTxs.Completed = exactlyOnceKeys[0] & publishIDMask
-		for range exactlyOnceKeys {
-			client.exactlyOnce.q <- make(chan<- error, 1) // won't block due Max check above
-		}
-		var pubN int
-		for i, key := range exactlyOnceKeys {
-			packet, ok := PUBRELPerKey[key]
-			if !ok {
-				pubN = len(exactlyOnceKeys) - i
-				client.orderedTxs.Received = key & publishIDMask
-				break
-			}
-			// send all those 4-byte packets in one batch
-			client.pendingAck = append(client.pendingAck, packet...)
-		}
-		if client.orderedTxs.Received == 0 {
-			client.orderedTxs.Received = exactlyOnceKeys[len(exactlyOnceKeys)-1]&publishIDMask + 1
-		}
-		<-client.exactlyOnce.seqNoSem
-		if pubN == 0 {
-			client.exactlyOnce.seqNoSem <- exactlyOnceKeys[len(exactlyOnceKeys)-1] + 1
+	// install exactly-once sequence counters
+	if publishKeys, releaseKeys := publishExactlyOnceKeys, publishReleaseKeys; len(publishKeys) != 0 || len(releaseKeys) != 0 {
+		// txs.Completed ≤ txs.Received ≤ seq.N
+		txs := &client.orderedTxs
+		if len(releaseKeys) == 0 {
+			txs.Completed = publishKeys[0] & publishIDMask
+			txs.Received = txs.Completed
 		} else {
-			client.exactlyOnce.block <- holdup{
-				SinceSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-pubN],
-				UntilSeqNo: exactlyOnceKeys[len(exactlyOnceKeys)-1],
+			txs.Completed = releaseKeys[0] & publishIDMask
+			txs.Received = releaseKeys[len(releaseKeys)-1]&publishIDMask + 1
+			if txs.Received < txs.Completed {
+				// pending range overflows address space
+				txs.Completed += publishIDMask + 1
 			}
 		}
+
+		var last uint
+		if len(publishKeys) != 0 {
+			last = publishKeys[len(publishKeys)-1]
+		} else {
+			last = releaseKeys[len(releaseKeys)-1]
+		}
+		seq := <-client.exactlyOnce.seqSem
+		seq.n = last&publishIDMask + 1
+		if seq.n < txs.Received {
+			seq.n += publishIDMask + 1 // address space overflow
+		}
+		client.exactlyOnce.seqSem <- seq
+	}
+
+	// install callback placeholders; won't block due Max check above
+	for range publishAtLeastOnceKeys {
+		client.atLeastOnce.q <- make(chan<- error, 1)
+	}
+	for range publishExactlyOnceKeys {
+		client.exactlyOnce.q <- make(chan<- error, 1)
+	}
+	for range publishReleaseKeys {
+		client.exactlyOnce.q <- make(chan<- error, 1)
 	}
 
 	return client, warn, nil
 }
 
-// SeqNos sorts ruggedPersistence sequence numbers chronologicaly.
-type seqNos []uint64
-
-// Len implements sort.Interface.
-func (a seqNos) Len() int { return len(a) }
-
-// Less implements sort.Interface.
-func (a seqNos) Less(i, j int) bool { return a[i] < a[j] }
-
-// Swap implements sort.Interface.
-func (a seqNos) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-
-// CleanSeq returns the last uninterrupted sequence from keys.
-func cleanSeq(keys []uint, name string, p Persistence, warn *[]error) (cleanKeys []uint) {
-	for len(keys) != 0 {
-		last := keys[0]
-		for i := 1; ; i++ {
-			if i >= len(keys) {
-				return keys
-			}
-			key := keys[i]
-
-			if key&publishIDMask == (last+1)&publishIDMask {
-				last = key
-				continue // correct followup
-			}
-
-			*warn = append(*warn, fmt.Errorf("mqtt: %s persistence records %#x–%#x lost due gap until %#x, caused by delete or save failure", name, keys[0], last, key))
-			for _, key := range keys[:i] {
-				err := p.Delete(key)
-				if err != nil {
-					*warn = append(*warn, fmt.Errorf("mqtt: persistence record %#v not deleted: %w", key, err))
-				}
-			}
-			keys = keys[i:]
-			break
+func cleanSequence(keys []uint, name string, warn *[]error) []uint {
+	for i := 1; i < len(keys); i++ {
+		n := keys[i] & publishIDMask
+		p := keys[i-1] & publishIDMask
+		if n-p == 1 || n == 0 && p == publishIDMask {
+			continue
 		}
+
+		*warn = append(*warn, fmt.Errorf("mqtt: %s %#x–%#x dropped ☠️ due gap until %#x", name, keys[0], keys[i-1], keys[i]))
+
+		keys = keys[i:]
+		i = 0
 	}
-	return nil
+	return keys
 }

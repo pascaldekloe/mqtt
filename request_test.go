@@ -36,9 +36,9 @@ func TestPingReqTimeout(t *testing.T) {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0xC0:
-			t.Fatalf("want PINGREQ head 0xC0, got %#x", buf[0])
+			t.Errorf("want PINGREQ head 0xC0, got %#x", buf[0])
 		}
 		// leave partial read
 	})
@@ -78,9 +78,9 @@ func TestSubscribeReqTimeout(t *testing.T) {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0x82:
-			t.Fatalf("want SUBSCRIBE head 0x82, got %#x", buf[0])
+			t.Errorf("want SUBSCRIBE head 0x82, got %#x", buf[0])
 		}
 		// leave partial read
 	})
@@ -118,9 +118,9 @@ func TestUnsubscribeReqTimeout(t *testing.T) {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0xa2:
-			t.Fatalf("want UNSUBSCRIBE head 0xa2, got %#x", buf[0])
+			t.Errorf("want UNSUBSCRIBE head 0xa2, got %#x", buf[0])
 		}
 		// leave partial read
 	})
@@ -155,9 +155,9 @@ func TestPublishReqTimeout(t *testing.T) {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0x30:
-			t.Fatalf("want PUBLISH head 0x30, got %#x", buf[0])
+			t.Errorf("want PUBLISH head 0x30, got %#x", buf[0])
 		}
 		// leave partial read
 	})
@@ -184,30 +184,38 @@ func TestPublishAtLeastOnce(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	testAck(t, ack)
+	verifyAck(t, ack)
 	<-brokerMockDone
 }
 
 func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0x32:
-			t.Fatalf("want PUBLISH head 0x32, got %#x", buf[0])
+			t.Errorf("want PUBLISH head 0x32, got %#x", buf[0])
 		}
 		// leave partial read
 	})
 
+	select {
+	case <-client.Online():
+		break
+	case <-timeout.C:
+		t.Fatal("client Online timeout")
+	}
+
 	ack, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
 	if err != nil {
-		t.Errorf("got error %q [%T]", err, err)
+		t.Fatalf("got error %q [%T]", err, err)
 	}
 	select {
-	case <-time.After(client.PauseTimeout):
-		t.Error("ack timeout")
 	case err, ok := <-ack:
 		var e net.Error
 		switch {
@@ -216,7 +224,10 @@ func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 		case !errors.As(err, &e) || !e.Timeout():
 			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
 		}
+	case <-timeout.C:
+		t.Error("ack timeout")
 	}
+
 	<-brokerMockDone
 }
 
@@ -231,7 +242,7 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 			0x80, 0x00, // packet identifier
 			'x'}))
 		if err := conns[0].Close(); err != nil {
-			t.Fatal("broker got error on first connection close:", err)
+			t.Error("broker got error on first connection close:", err)
 		}
 
 		wantPacketHex(t, conns[1], pipeCONNECTHex)
@@ -248,7 +259,7 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	testAck(t, ack)
+	verifyAck(t, ack)
 	<-brokerMockDone
 }
 
@@ -282,8 +293,11 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		t.Fatal("InitSession error:", err)
 	}
 	testClient(t, client)
+	brokerConn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
+
+	<-client.Online()
 
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, brokerConn, publish1)
@@ -316,10 +330,14 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	if err != nil {
 		t.Errorf("publish № 3 got error %q [%T]", err, err)
 	}
+	verifyAck(t, ack1)
+	verifyAckError(t, ack2, mqtt.ErrClosed)
+	verifyAckError(t, ack3, io.ErrClosedPipe)
+
 	<-brokerMockDone
-	testAck(t, ack1)
-	testAckClosed(t, ack2)
-	testAckClosed(t, ack3)
+	if t.Failed() {
+		return
+	}
 
 	// verify persistence; seals compatibility
 	publish2File := filepath.Join(dir, "08001") // named after it's packet ID
@@ -363,6 +381,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		t.Error("AdoptSession warning:", err)
 	}
 	testClient(t, client)
+	brokerConn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
 	wantPacketHex(t, brokerConn, publish2Dupe)
@@ -401,30 +420,38 @@ func TestPublishExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	testAck(t, ack)
+	verifyAck(t, ack)
 	<-brokerMockDone
 }
 
 func TestPublishExactlyOnceReqTimeout(t *testing.T) {
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+
 	client, conn := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
 		case err != nil:
-			t.Fatal("broker read error:", err)
+			t.Error("broker read error:", err)
 		case buf[0] != 0x34:
-			t.Fatalf("want PUBLISH head 0x34, got %#x", buf[0])
+			t.Errorf("want PUBLISH head 0x34, got %#x", buf[0])
 		}
 		// leave partial read
 	})
 
+	select {
+	case <-client.Online():
+		break
+	case <-timeout.C:
+		t.Fatal("client Online timeout")
+	}
+
 	ack, err := client.PublishExactlyOnce([]byte{'x'}, "y")
 	if err != nil {
-		t.Errorf("got error %q [%T]", err, err)
+		t.Fatalf("Publish error %q [%T]", err, err)
 	}
 	select {
-	case <-time.After(client.PauseTimeout):
-		t.Error("ack timeout")
 	case err, ok := <-ack:
 		var e net.Error
 		switch {
@@ -433,6 +460,8 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 		case !errors.As(err, &e) || !e.Timeout():
 			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
 		}
+	case <-timeout.C:
+		t.Error("ack timeout")
 	}
 	<-brokerMockDone
 }
@@ -591,34 +620,69 @@ func TestDeny(t *testing.T) {
 	}
 }
 
-func testAck(t *testing.T, ack <-chan error) {
+func verifyAck(t *testing.T, ack <-chan error) {
 	t.Helper()
-	timeout := time.NewTimer(2 * time.Second)
+	timeout := time.NewTimer(200 * time.Millisecond)
 	defer timeout.Stop()
 
-	select {
-	case <-timeout.C:
-		t.Fatal("ack read timeout")
+	var errDownN int
 
-	case err, ok := <-ack:
-		if ok {
-			t.Errorf("ack got error %q [%T]", err, err)
+	for {
+		select {
+		case <-timeout.C:
+			t.Fatal("ack timeout")
+
+		case err, ok := <-ack:
+			if !ok {
+				return
+			}
+
+			if !errors.Is(err, mqtt.ErrDown) {
+				t.Errorf("ack error %q [%T]", err, err)
+				return
+			}
+
+			errDownN++
+			if errDownN > 1 {
+				t.Error("duplicate ack ErrDown")
+				return
+			}
+			t.Log("ack ErrDown permitted")
 		}
 	}
 }
 
-func testAckClosed(t *testing.T, ack <-chan error) {
+func verifyAckError(t *testing.T, ack <-chan error, want error) {
 	t.Helper()
-	timeout := time.NewTimer(2 * time.Second)
+	timeout := time.NewTimer(200 * time.Millisecond)
 	defer timeout.Stop()
 
-	select {
-	case <-timeout.C:
-		t.Fatal("ack read timeout")
+	var errDownN int
 
-	case err := <-ack:
-		if !errors.Is(err, mqtt.ErrClosed) {
-			t.Errorf("ack got error %q [%T]", err, err)
+	for {
+		select {
+		case <-timeout.C:
+			t.Fatal("ack read timeout")
+
+		case err, ok := <-ack:
+			if !ok {
+				t.Errorf("ack release, want error %q", want)
+				return
+			}
+
+			if !errors.Is(err, mqtt.ErrDown) {
+				if !errors.Is(err, want) {
+					t.Errorf("ack error %q [%T], want error %q", err, err, want)
+				}
+				return
+			}
+
+			errDownN++
+			if errDownN > 1 {
+				t.Error("duplicate ack ErrDown")
+				return
+			}
+			t.Log("ack ErrDown permitted")
 		}
 	}
 }
