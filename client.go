@@ -807,8 +807,12 @@ func (c *Client) connect() error {
 	if oldConn != nil && c.CleanSession {
 		c.CleanSession = false
 	}
-	ctx, cancel := context.WithTimeout(c.dialCtx, c.PauseTimeout)
-	defer cancel()
+	ctx := c.dialCtx
+	if c.PauseTimeout != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(c.dialCtx, c.PauseTimeout)
+		defer cancel()
+	}
 	conn, err := c.Dialer(ctx)
 	if err != nil {
 		c.connSem <- oldConn // unlock for next attempt
