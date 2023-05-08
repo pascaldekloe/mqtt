@@ -1,7 +1,7 @@
 version: "3"
 services:
   test:
-    image: golang:1.16
+    image: golang:1.19
     volumes:
       - ..:/code
     command: go test -v -race
