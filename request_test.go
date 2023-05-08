@@ -367,7 +367,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		return
 	}
 
-	// continue with another Client
+	t.Log("continue with another Client")
 	clientConn, brokerConn = net.Pipe()
 	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
@@ -464,6 +464,222 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 		t.Error("ack timeout")
 	}
 	<-brokerMockDone
+}
+
+// TestPublishExactlyOnceRestart sends five messages as QOS 2 PUBLISH. The
+// broker simulation will do all of the following:
+//
+//   - Complete PUBLISH № 1.
+//   - Halt at PUBCOMP № 2 (not send).
+//   - Halt at PUBREL № 3 (not receive).
+//   - Halt at PUBREC № 4 (not send)
+//   - Halt at PUBLISH № 5 (not receive).
+//
+// … it does so with the following steps.
+//
+//   - Receive PUBLISH № 1.
+//   - Receive PUBLISH № 2.
+//   - Send PUBREC № 1.
+//   - Send PUBREC № 2.
+//   - Receive PUBREL № 1.
+//   - Receive PUBREL № 2.
+//   - Send PUBCOMP № 1.
+//   - <little sleep>
+//   - Receive PUBLISH № 3.
+//   - Receive PUBLISH № 4.
+//   - Send PUBREC № 3.
+//
+// Then the session is continued with a new client. It must automatically
+// PUBLISH message № 4 and 5 again, and it must PUBREL message № 2 and 3.
+func TestPublishExactlyOnceRestart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir() // persistence location
+
+	const publish1 = "3406000178c00031"     // '1' (0x31) @ 'x' (0x78)
+	const publish2 = "3406000178c00132"     // '2' (0x32) @ 'x' (0x78)
+	const publish3 = "3406000178c00233"     // '3' (0x33) @ 'x' (0x78)
+	const publish4 = "3406000178c00334"     // '4' (0x34) @ 'x' (0x78)
+	const publish5 = "3406000178c00435"     // '5' (0x35) @ 'x' (0x78)
+	const publish4Dupe = "3c06000178c00334" // with duplicate [DUP] flag
+	const publish5Dupe = "3c06000178c00435" // with duplicate [DUP] flag
+
+	clientConn, brokerConn := net.Pipe()
+	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
+		PauseTimeout:   time.Second / 4,
+		ExactlyOnceMax: 5,
+		Dialer:         newTestDialer(t, clientConn),
+	})
+	if err != nil {
+		t.Fatal("InitSession error:", err)
+	}
+	testClient(t, client, mqtttest.Transfer{Err: io.ErrClosedPipe})
+	brokerConn.SetDeadline(time.Now().Add(time.Second))
+	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
+	sendPacketHex(t, brokerConn, "20020000") // CONNACK
+
+	brokerMockDone := testRoutine(t, func() {
+		wantPacketHex(t, brokerConn, publish1)
+		wantPacketHex(t, brokerConn, publish2)
+		sendPacketHex(t, brokerConn, "5002c000") // PUBREC № 1
+		wantPacketHex(t, brokerConn, "6202c000") // PUBREL № 1
+		sendPacketHex(t, brokerConn, "5002c001") // PUBREC № 2
+		wantPacketHex(t, brokerConn, "6202c001") // PUBREL № 2
+		sendPacketHex(t, brokerConn, "7002c000") // PUBCOMP № 1
+		wantPacketHex(t, brokerConn, publish3)
+		wantPacketHex(t, brokerConn, publish4)
+		sendPacketHex(t, brokerConn, "5002c002") // PUBREC № 3
+
+		// PUBLISH № 5 before client close
+		time.Sleep(200 * time.Millisecond)
+		err := client.Close()
+		if err != nil {
+			t.Error("Close error:", err)
+		}
+	})
+
+	<-client.Online()
+
+	ack1, err := client.PublishExactlyOnce([]byte{'1'}, "x")
+	if err != nil {
+		t.Errorf("publish № 1 got error %q [%T]", err, err)
+	}
+	ack2, err := client.PublishExactlyOnce([]byte{'2'}, "x")
+	if err != nil {
+		t.Errorf("publish № 2 got error %q [%T]", err, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	ack3, err := client.PublishExactlyOnce([]byte{'3'}, "x")
+	if err != nil {
+		t.Errorf("publish № 3 got error %q [%T]", err, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	ack4, err := client.PublishExactlyOnce([]byte{'4'}, "x")
+	if err != nil {
+		t.Errorf("publish № 4 got error %q [%T]", err, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	ack5, err := client.PublishExactlyOnce([]byte{'5'}, "x")
+	if err != nil {
+		t.Errorf("publish № 5 got error %q [%T]", err, err)
+	}
+	<-brokerMockDone
+	verifyAck(t, ack1)
+	verifyAckError(t, ack2, mqtt.ErrClosed)
+	verifyAckError(t, ack3, mqtt.ErrClosed)
+	verifyAckError(t, ack4, mqtt.ErrClosed)
+	verifyAckError(t, ack5, mqtt.ErrClosed)
+
+	// verify persistence; seals compatibility
+	publish1File := filepath.Join(dir, "0c000") // named after it's packet ID
+	publish2File := filepath.Join(dir, "0c001")
+	publish3File := filepath.Join(dir, "0c002")
+	publish4File := filepath.Join(dir, "0c003")
+	publish5File := filepath.Join(dir, "0c004")
+	if _, err := os.Stat(publish1File); err == nil {
+		t.Error("publish № 1 file still exits after PUBCOMP", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 1 file error:", err)
+	}
+	if bytes, err := os.ReadFile(publish2File); err != nil {
+		t.Error("publish № 2 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = "6202c001" + "0500000000000000" + "74d798bf" // PUBREL № 2
+		if got != want {
+			t.Errorf("publish № 2 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+	if bytes, err := os.ReadFile(publish3File); err != nil {
+		t.Error("publish № 3 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = "6202c002" + "0800000000000000" + "6bb2f52f" // PUBREL № 3
+		if got != want {
+			t.Errorf("publish № 3 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+	if bytes, err := os.ReadFile(publish4File); err != nil {
+		t.Error("publish № 4 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = publish4 + "0700000000000000" + "2d4cbd7c"
+		if got != want {
+			t.Errorf("publish № 4 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+	if bytes, err := os.ReadFile(publish5File); err != nil {
+		t.Error("publish № 5 file:", err)
+	} else {
+		got := hex.EncodeToString(bytes)
+		// packet + sequence number + checksum:
+		const want = publish5 + "0900000000000000" + "1d6d8b0e"
+		if got != want {
+			t.Errorf("publish № 5 file contains 0x%s, want 0x%s", got, want)
+		}
+	}
+
+	if t.Failed() {
+		return
+	}
+
+	t.Log("continue with another Client")
+	clientConn, brokerConn = net.Pipe()
+	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
+		PauseTimeout:   time.Second / 4,
+		ExactlyOnceMax: 4,
+		Dialer:         newTestDialer(t, clientConn),
+	})
+	for _, err := range warn {
+		t.Error("AdoptSession warning:", err)
+	}
+	if err != nil {
+		t.Fatal("AdoptSession error:", err)
+	}
+	testClient(t, client)
+	brokerConn.SetDeadline(time.Now().Add(time.Second))
+	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
+	sendPacketHex(t, brokerConn, "20020000") // CONNACK
+
+	wantPacketHex(t, brokerConn, "6202c001") // PUBREL № 2
+	wantPacketHex(t, brokerConn, "6202c002") // PUBREL № 3
+	wantPacketHex(t, brokerConn, publish4Dupe)
+	wantPacketHex(t, brokerConn, publish5Dupe)
+	go func() {
+		sendPacketHex(t, brokerConn, "5002c003") // PUBREC № 4
+		sendPacketHex(t, brokerConn, "5002c004") // PUBREC № 5
+	}()
+	wantPacketHex(t, brokerConn, "6202c003") // PUBREL № 4
+	wantPacketHex(t, brokerConn, "6202c004") // PUBREL № 5
+	sendPacketHex(t, brokerConn, "7002c001") // PUBCOMP № 2
+	sendPacketHex(t, brokerConn, "7002c002") // PUBCOMP № 3
+	sendPacketHex(t, brokerConn, "7002c003") // PUBCOMP № 4
+	sendPacketHex(t, brokerConn, "7002c004") // PUBCOMP № 5
+
+	// await PUBCOMP appliance
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(publish2File); err == nil {
+		t.Error("publish № 2 file still exits after PUBCOMP", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 2 file error:", err)
+	}
+	if _, err := os.Stat(publish3File); err == nil {
+		t.Error("publish № 3 file still exits after PUBCOMP", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 3 file error:", err)
+	}
+	if _, err := os.Stat(publish4File); err == nil {
+		t.Error("publish № 4 file still exits after PUBCOMP", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 4 file error:", err)
+	}
+	if _, err := os.Stat(publish5File); err == nil {
+		t.Error("publish № 5 file still exits after PUBCOMP", err)
+	} else if !os.IsNotExist(err) {
+		t.Error("publish № 5 file error:", err)
+	}
 }
 
 // Brokers may resend a PUBREL even after receiving PUBCOMP (in case the serice
