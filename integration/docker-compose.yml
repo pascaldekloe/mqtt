@@ -11,19 +11,19 @@ services:
       - MQTT_HOSTS=emqx gmqtt hivemq hmq mosquitto vernemq
 
   emqx:
-    image: emqx/emqx:4.2.5
+    image: emqx/emqx:5.0.24
     mem_limit: 500m
   gmqtt:
     image: gmqtt/gmqttd:v0.2.2
     mem_limit: 500m
   hivemq:
-    image: hivemq/hivemq4:4.4.4
+    image: hivemq/hivemq4:4.8.12
     mem_limit: 3000m
   hmq:
     image: habakke/hmq:2.0.57
     mem_limit: 500m
   mosquitto:
-    image: eclipse-mosquitto:1.6.12
+    image: eclipse-mosquitto:1.6.15
     mem_limit: 500m
   vernemq:
     image: vernemq/vernemq:1.10.4.1
