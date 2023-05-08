@@ -2,6 +2,7 @@ version: "3"
 services:
   test:
     image: golang:1.19
+    mem_limit: 500m
     volumes:
       - ..:/code
     command: go test -v -race
@@ -11,16 +12,22 @@ services:
 
   emqx:
     image: emqx/emqx:4.2.5
+    mem_limit: 500m
   gmqtt:
     image: gmqtt/gmqttd:v0.2.2
+    mem_limit: 500m
   hivemq:
     image: hivemq/hivemq4:4.4.4
+    mem_limit: 3000m
   hmq:
     image: habakke/hmq:2.0.57
+    mem_limit: 500m
   mosquitto:
     image: eclipse-mosquitto:1.6.12
+    mem_limit: 500m
   vernemq:
     image: vernemq/vernemq:1.10.4.1
+    mem_limit: 1000m
     environment:
       - DOCKER_VERNEMQ_ACCEPT_EULA=yes
       - DOCKER_VERNEMQ_ALLOW_ANONYMOUS=on
