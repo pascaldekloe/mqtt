@@ -17,13 +17,13 @@ import (
 )
 
 func TestPing(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, "c000") // PINGREQ
 		sendPacketHex(t, conn, "d000") // PINGRESP
 	})
 
-	err := client.Ping(nil)
+	err := client.Ping(testTimeout)
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
@@ -31,7 +31,7 @@ func TestPing(t *testing.T) {
 }
 
 func TestPingReqTimeout(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -43,7 +43,7 @@ func TestPingReqTimeout(t *testing.T) {
 		// leave partial read
 	})
 
-	err := client.Ping(nil)
+	err := client.Ping(testTimeout)
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
@@ -52,7 +52,7 @@ func TestPingReqTimeout(t *testing.T) {
 }
 
 func TestSubscribeMultiple(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x82, 19,
@@ -65,7 +65,7 @@ func TestSubscribeMultiple(t *testing.T) {
 		sendPacketHex(t, conn, "900460000102") // SUBACK
 	})
 
-	err := client.Subscribe(nil, "u/noi", "u/shin")
+	err := client.Subscribe(testTimeout, "u/noi", "u/shin")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
@@ -73,7 +73,7 @@ func TestSubscribeMultiple(t *testing.T) {
 }
 
 func TestSubscribeReqTimeout(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -85,7 +85,7 @@ func TestSubscribeReqTimeout(t *testing.T) {
 		// leave partial read
 	})
 
-	err := client.Subscribe(nil, "x")
+	err := client.Subscribe(testTimeout, "x")
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
@@ -94,7 +94,7 @@ func TestSubscribeReqTimeout(t *testing.T) {
 }
 
 func TestUnsubscribeMultiple(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0xa2, 17,
@@ -105,7 +105,7 @@ func TestUnsubscribeMultiple(t *testing.T) {
 		sendPacketHex(t, conn, "b0024000") // UNSUBACK
 	})
 
-	err := client.Unsubscribe(nil, "u/noi", "u/shin")
+	err := client.Unsubscribe(testTimeout, "u/noi", "u/shin")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
@@ -113,7 +113,7 @@ func TestUnsubscribeMultiple(t *testing.T) {
 }
 
 func TestUnsubscribeReqTimeout(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -125,7 +125,7 @@ func TestUnsubscribeReqTimeout(t *testing.T) {
 		// leave partial read
 	})
 
-	err := client.Unsubscribe(nil, "x")
+	err := client.Unsubscribe(testTimeout, "x")
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
@@ -134,7 +134,7 @@ func TestUnsubscribeReqTimeout(t *testing.T) {
 }
 
 func TestPublish(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x30, 12,
@@ -142,7 +142,7 @@ func TestPublish(t *testing.T) {
 			'h', 'e', 'l', 'l', 'o'}))
 	})
 
-	err := client.Publish(nil, []byte("hello"), "greet")
+	err := client.Publish(testTimeout, []byte("hello"), "greet")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
@@ -150,7 +150,7 @@ func TestPublish(t *testing.T) {
 }
 
 func TestPublishReqTimeout(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -162,7 +162,7 @@ func TestPublishReqTimeout(t *testing.T) {
 		// leave partial read
 	})
 
-	err := client.Publish(nil, []byte{'x'}, "y")
+	err := client.Publish(testTimeout, []byte{'x'}, "y")
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
@@ -170,7 +170,7 @@ func TestPublishReqTimeout(t *testing.T) {
 }
 
 func TestPublishAtLeastOnce(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x32, 14,
@@ -180,19 +180,16 @@ func TestPublishAtLeastOnce(t *testing.T) {
 		sendPacketHex(t, conn, "40028000") // SUBACK
 	})
 
-	ack, err := client.PublishAtLeastOnce([]byte("hello"), "greet")
+	exchange, err := client.PublishAtLeastOnce([]byte("hello"), "greet")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	verifyAck(t, ack)
+	verifyExchange(t, testTimeout, exchange)
 	<-brokerMockDone
 }
 
 func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
-	timeout := time.NewTimer(time.Second)
-	defer timeout.Stop()
-
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -207,26 +204,15 @@ func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 	select {
 	case <-client.Online():
 		break
-	case <-timeout.C:
-		t.Fatal("client Online timeout")
+	case <-testTimeout:
+		t.Fatal("test timeout while awaiting client Online")
 	}
 
-	ack, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
+	exchange, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
 	if err != nil {
 		t.Fatalf("got error %q [%T]", err, err)
 	}
-	select {
-	case err, ok := <-ack:
-		var e net.Error
-		switch {
-		case !ok:
-			t.Error("ack closed, want a Timeout net.Error")
-		case !errors.As(err, &e) || !e.Timeout():
-			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
-		}
-	case <-timeout.C:
-		t.Error("ack timeout")
-	}
+	verifyExchangeTimeout(t, testTimeout, exchange)
 
 	<-brokerMockDone
 }
@@ -234,7 +220,7 @@ func TestPublishAtLeastOnceReqTimeout(t *testing.T) {
 // A Client must resend each PUBLISH which is pending PUBACK when the connection
 // is reset (for whater reasons).
 func TestPublishAtLeastOnceResend(t *testing.T) {
-	client, conns := newClientPipeN(t, 2, mqtttest.Transfer{Err: io.EOF})
+	client, conns, testTimeout := newClientPipeN(t, 2, mqtttest.Transfer{Err: io.EOF})
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conns[0], hex.EncodeToString([]byte{
 			0x32, 6,
@@ -245,8 +231,8 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 			t.Error("broker got error on first connection close:", err)
 		}
 
-		wantPacketHex(t, conns[1], pipeCONNECTHex)
-		sendPacketHex(t, conns[1], "20020000") // CONNACK
+		wantPacketHex(t, conns[1], "100c00044d515454040000000000") // CONNECT
+		sendPacketHex(t, conns[1], "20020000")                     // CONNACK
 		wantPacketHex(t, conns[1], hex.EncodeToString([]byte{
 			0x3a, 6, // with duplicate [DUP] flag
 			0, 1, 'y',
@@ -255,11 +241,11 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 		sendPacketHex(t, conns[1], "40028000") // SUBACK after all
 	})
 
-	ack, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
+	exchange, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	verifyAck(t, ack)
+	verifyExchange(t, testTimeout, exchange)
 	<-brokerMockDone
 }
 
@@ -277,6 +263,10 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir() // persistence location
 
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	testTimeout := ctx.Done()
+
 	const publish1 = "3206000178800031"     // '1' (0x31) @ 'x' (0x78)
 	const publish2 = "3206000178800132"     // '2' (0x32) @ 'x' (0x78)
 	const publish3 = "3206000178800233"     // '3' (0x33) @ 'x' (0x78)
@@ -292,7 +282,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal("InitSession error:", err)
 	}
-	testClient(t, client)
+	verifyClient(t, client)
 	brokerConn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
@@ -318,26 +308,23 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 		}
 	})
 
-	ack1, err := client.PublishAtLeastOnce([]byte{'1'}, "x")
+	exchange1, err := client.PublishAtLeastOnce([]byte{'1'}, "x")
 	if err != nil {
 		t.Errorf("publish № 1 got error %q [%T]", err, err)
 	}
-	ack2, err := client.PublishAtLeastOnce([]byte{'2'}, "x")
+	exchange2, err := client.PublishAtLeastOnce([]byte{'2'}, "x")
 	if err != nil {
 		t.Errorf("publish № 2 got error %q [%T]", err, err)
 	}
-	ack3, err := client.PublishAtLeastOnce([]byte{'3'}, "x")
+	exchange3, err := client.PublishAtLeastOnce([]byte{'3'}, "x")
 	if err != nil {
 		t.Errorf("publish № 3 got error %q [%T]", err, err)
 	}
-	verifyAck(t, ack1)
-	verifyAckError(t, ack2, mqtt.ErrClosed)
-	verifyAckError(t, ack3, io.ErrClosedPipe)
+	verifyExchange(t, testTimeout, exchange1)
+	verifyExchangeError(t, testTimeout, exchange2, mqtt.ErrClosed)
+	verifyExchangeError(t, testTimeout, exchange3, io.ErrClosedPipe)
 
 	<-brokerMockDone
-	if t.Failed() {
-		return
-	}
 
 	// verify persistence; seals compatibility
 	publish2File := filepath.Join(dir, "08001") // named after it's packet ID
@@ -380,7 +367,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	for _, err := range warn {
 		t.Error("AdoptSession warning:", err)
 	}
-	testClient(t, client)
+	verifyClient(t, client)
 	brokerConn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
@@ -404,7 +391,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 }
 
 func TestPublishExactlyOnce(t *testing.T) {
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, conn, hex.EncodeToString([]byte{
 			0x34, 14,
@@ -416,19 +403,16 @@ func TestPublishExactlyOnce(t *testing.T) {
 		sendPacketHex(t, conn, "7002c000") // PUBCOMP
 	})
 
-	ack, err := client.PublishExactlyOnce([]byte("hello"), "greet")
+	exchange, err := client.PublishExactlyOnce([]byte("hello"), "greet")
 	if err != nil {
 		t.Errorf("got error %q [%T]", err, err)
 	}
-	verifyAck(t, ack)
+	verifyExchange(t, testTimeout, exchange)
 	<-brokerMockDone
 }
 
 func TestPublishExactlyOnceReqTimeout(t *testing.T) {
-	timeout := time.NewTimer(time.Second)
-	defer timeout.Stop()
-
-	client, conn := newClientPipe(t)
+	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
 		var buf [1]byte
 		switch _, err := io.ReadFull(conn, buf[:]); {
@@ -443,26 +427,15 @@ func TestPublishExactlyOnceReqTimeout(t *testing.T) {
 	select {
 	case <-client.Online():
 		break
-	case <-timeout.C:
-		t.Fatal("client Online timeout")
+	case <-testTimeout:
+		t.Fatal("test timeout while awaiting Online")
 	}
 
-	ack, err := client.PublishExactlyOnce([]byte{'x'}, "y")
+	exchange, err := client.PublishExactlyOnce([]byte{'x'}, "y")
 	if err != nil {
 		t.Fatalf("Publish error %q [%T]", err, err)
 	}
-	select {
-	case err, ok := <-ack:
-		var e net.Error
-		switch {
-		case !ok:
-			t.Error("ack closed, want a Timeout net.Error")
-		case !errors.As(err, &e) || !e.Timeout():
-			t.Errorf("got ack error %q [%T], want a Timeout net.Error", err, err)
-		}
-	case <-timeout.C:
-		t.Error("ack timeout")
-	}
+	verifyExchangeTimeout(t, testTimeout, exchange)
 	<-brokerMockDone
 }
 
@@ -495,6 +468,10 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir() // persistence location
 
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	testTimeout := ctx.Done()
+
 	const publish1 = "3406000178c00031"     // '1' (0x31) @ 'x' (0x78)
 	const publish2 = "3406000178c00132"     // '2' (0x32) @ 'x' (0x78)
 	const publish3 = "3406000178c00233"     // '3' (0x33) @ 'x' (0x78)
@@ -512,7 +489,7 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal("InitSession error:", err)
 	}
-	testClient(t, client, mqtttest.Transfer{Err: io.ErrClosedPipe})
+	verifyClient(t, client, mqtttest.Transfer{Err: io.ErrClosedPipe})
 	brokerConn.SetDeadline(time.Now().Add(time.Second))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
@@ -539,35 +516,35 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 
 	<-client.Online()
 
-	ack1, err := client.PublishExactlyOnce([]byte{'1'}, "x")
+	exchange1, err := client.PublishExactlyOnce([]byte{'1'}, "x")
 	if err != nil {
 		t.Errorf("publish № 1 got error %q [%T]", err, err)
 	}
-	ack2, err := client.PublishExactlyOnce([]byte{'2'}, "x")
+	exchange2, err := client.PublishExactlyOnce([]byte{'2'}, "x")
 	if err != nil {
 		t.Errorf("publish № 2 got error %q [%T]", err, err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	ack3, err := client.PublishExactlyOnce([]byte{'3'}, "x")
+	exchange3, err := client.PublishExactlyOnce([]byte{'3'}, "x")
 	if err != nil {
 		t.Errorf("publish № 3 got error %q [%T]", err, err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	ack4, err := client.PublishExactlyOnce([]byte{'4'}, "x")
+	exchange4, err := client.PublishExactlyOnce([]byte{'4'}, "x")
 	if err != nil {
 		t.Errorf("publish № 4 got error %q [%T]", err, err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	ack5, err := client.PublishExactlyOnce([]byte{'5'}, "x")
+	exchange5, err := client.PublishExactlyOnce([]byte{'5'}, "x")
 	if err != nil {
 		t.Errorf("publish № 5 got error %q [%T]", err, err)
 	}
 	<-brokerMockDone
-	verifyAck(t, ack1)
-	verifyAckError(t, ack2, mqtt.ErrClosed)
-	verifyAckError(t, ack3, mqtt.ErrClosed)
-	verifyAckError(t, ack4, mqtt.ErrClosed)
-	verifyAckError(t, ack5, mqtt.ErrClosed)
+	verifyExchange(t, testTimeout, exchange1)
+	verifyExchangeError(t, testTimeout, exchange2, mqtt.ErrClosed)
+	verifyExchangeError(t, testTimeout, exchange3, mqtt.ErrClosed)
+	verifyExchangeError(t, testTimeout, exchange4, mqtt.ErrClosed)
+	verifyExchangeError(t, testTimeout, exchange5, mqtt.ErrClosed)
 
 	// verify persistence; seals compatibility
 	publish1File := filepath.Join(dir, "0c000") // named after it's packet ID
@@ -638,7 +615,7 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal("AdoptSession error:", err)
 	}
-	testClient(t, client)
+	verifyClient(t, client)
 	brokerConn.SetDeadline(time.Now().Add(time.Second))
 	wantPacketHex(t, brokerConn, "101700044d51545404000000000b746573742d636c69656e74")
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
@@ -685,17 +662,14 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 // Brokers may resend a PUBREL even after receiving PUBCOMP (in case the serice
 // crashed for example).
 func TestPUBRELRetry(t *testing.T) {
-	_, conn := newClientPipe(t)
-	brokerMockDone := testRoutine(t, func() {
-		sendPacketHex(t, conn, "62021234") // PUBREL
-		wantPacketHex(t, conn, "70021234") // PUBCOMP
-	})
-	<-brokerMockDone
+	_, conn, _ := newClientPipe(t)
+	sendPacketHex(t, conn, "62021234") // PUBREL
+	wantPacketHex(t, conn, "70021234") // PUBCOMP
 }
 
 func TestAbandon(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	client, conn := newClientPipe(t)
+	client, conn, _ := newClientPipe(t)
 
 	pingDone := testRoutine(t, func() {
 		err := client.Ping(ctx.Done())
@@ -728,12 +702,10 @@ func TestAbandon(t *testing.T) {
 }
 
 func TestBreak(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	client, conn := newClientPipe(t, mqtttest.Transfer{Err: io.EOF})
+	client, conn, testTimeout := newClientPipe(t, mqtttest.Transfer{Err: io.EOF})
 
 	pingDone := testRoutine(t, func() {
-		err := client.Ping(ctx.Done())
+		err := client.Ping(testTimeout)
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("ping got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
@@ -741,7 +713,7 @@ func TestBreak(t *testing.T) {
 	wantPacketHex(t, conn, "c000") // PINGREQ
 
 	subscribeDone := testRoutine(t, func() {
-		err := client.Subscribe(ctx.Done(), "x")
+		err := client.Subscribe(testTimeout, "x")
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("subscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
@@ -749,7 +721,7 @@ func TestBreak(t *testing.T) {
 	wantPacketHex(t, conn, "8206600000017802") // SUBSCRIBE
 
 	unsubscribeDone := testRoutine(t, func() {
-		err := client.Unsubscribe(ctx.Done(), "x")
+		err := client.Unsubscribe(testTimeout, "x")
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("unsubscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
 		}
@@ -766,10 +738,10 @@ func TestBreak(t *testing.T) {
 
 func TestDeny(t *testing.T) {
 	// no invocation to the client allowed
-	client, _ := newClientPipe(t)
+	client, _, testTimeout := newClientPipe(t)
 
 	// UTF-8 validation
-	err := client.PublishRetained(nil, nil, "topic with \xED\xA0\x80 not allowed")
+	err := client.PublishRetained(testTimeout, nil, "topic with \xED\xA0\x80 not allowed")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with U+D800 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
@@ -790,34 +762,34 @@ func TestDeny(t *testing.T) {
 		t.Errorf("subscribe with broken UTF-8 got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
 
-	err = client.Subscribe(nil)
+	err = client.Subscribe(testTimeout)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("subscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Unsubscribe(nil)
+	err = client.Unsubscribe(testTimeout)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Subscribe(nil, "")
+	err = client.Subscribe(testTimeout, "")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("subscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Unsubscribe(nil, "")
+	err = client.Unsubscribe(testTimeout, "")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Publish(nil, nil, "")
+	err = client.Publish(testTimeout, nil, "")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
 
 	// size limits
 	tooBig := strings.Repeat("A", 1<<16)
-	err = client.Unsubscribe(nil, tooBig)
+	err = client.Unsubscribe(testTimeout, tooBig)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with 64 KiB filter got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Publish(nil, make([]byte, 256*1024*1024), "")
+	err = client.Publish(testTimeout, make([]byte, 256*1024*1024), "")
 	if !mqtt.IsDeny(err) {
 		t.Errorf("publish with 256 MiB got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
@@ -826,79 +798,106 @@ func TestDeny(t *testing.T) {
 	for i := range filtersTooBig {
 		filtersTooBig[i] = KiB
 	}
-	err = client.Subscribe(nil, filtersTooBig...)
+	err = client.Subscribe(testTimeout, filtersTooBig...)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("subscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
-	err = client.Unsubscribe(nil, filtersTooBig...)
+	err = client.Unsubscribe(testTimeout, filtersTooBig...)
 	if !mqtt.IsDeny(err) {
 		t.Errorf("unsubscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
 	}
 }
 
-func verifyAck(t *testing.T, ack <-chan error) {
+func verifyExchange(t *testing.T, testTimeout <-chan struct{}, exchange <-chan error) {
 	t.Helper()
-	timeout := time.NewTimer(200 * time.Millisecond)
-	defer timeout.Stop()
 
 	var errDownN int
 
 	for {
 		select {
-		case <-timeout.C:
-			t.Fatal("ack timeout")
+		case <-testTimeout:
+			t.Fatal("test timeout while awaiting exchange")
 
-		case err, ok := <-ack:
+		case err, ok := <-exchange:
 			if !ok {
 				return
 			}
 
 			if !errors.Is(err, mqtt.ErrDown) {
-				t.Errorf("ack error %q [%T]", err, err)
+				t.Errorf("exchange error %q [%T]", err, err)
 				return
 			}
 
 			errDownN++
 			if errDownN > 1 {
-				t.Error("duplicate ack ErrDown")
-				return
+				t.Fatal("exchange ErrDown duplicate")
 			}
-			t.Log("ack ErrDown permitted")
+			t.Log("exchange ErrDown permitted")
 		}
 	}
 }
 
-func verifyAckError(t *testing.T, ack <-chan error, want error) {
+func verifyExchangeTimeout(t *testing.T, testTimeout <-chan struct{}, exchange <-chan error) {
 	t.Helper()
-	timeout := time.NewTimer(200 * time.Millisecond)
-	defer timeout.Stop()
 
 	var errDownN int
 
 	for {
 		select {
-		case <-timeout.C:
-			t.Fatal("ack read timeout")
+		case <-testTimeout:
+			t.Fatal("test timeout while awaiting exchange timeout error")
 
-		case err, ok := <-ack:
+		case err, ok := <-exchange:
 			if !ok {
-				t.Errorf("ack release, want error %q", want)
+				t.Errorf("exchange complete, want timeout error")
 				return
 			}
 
 			if !errors.Is(err, mqtt.ErrDown) {
-				if !errors.Is(err, want) {
-					t.Errorf("ack error %q [%T], want error %q", err, err, want)
+				var e net.Error
+				if !errors.As(err, &e) || !e.Timeout() {
+					t.Errorf("exchange error %q [%T], want a timeout error", err, err)
 				}
 				return
 			}
 
 			errDownN++
 			if errDownN > 1 {
-				t.Error("duplicate ack ErrDown")
+				t.Fatal("exchange ErrDown duplicate")
+			}
+			t.Log("exchange ErrDown permitted")
+		}
+	}
+}
+
+func verifyExchangeError(t *testing.T, testTimeout <-chan struct{}, exchange <-chan error, want error) {
+	t.Helper()
+
+	var errDownN int
+
+	for {
+		select {
+		case <-testTimeout:
+			t.Fatal("test timeout while awaiting exchange error")
+
+		case err, ok := <-exchange:
+			if !ok {
+				t.Errorf("exchange complete, want error %q", want)
 				return
 			}
-			t.Log("ack ErrDown permitted")
+
+			if !errors.Is(err, mqtt.ErrDown) {
+				if !errors.Is(err, want) {
+					t.Errorf("exchange error %q [%T], want ErrDown", err, err)
+				}
+				return
+			}
+
+			errDownN++
+			if errDownN > 1 {
+				t.Fatal("exchange ErrDown duplicate")
+			}
+			t.Log("exchange ErrDown permitted")
 		}
 	}
 }
