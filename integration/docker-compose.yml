@@ -13,9 +13,6 @@ services:
   emqx:
     image: emqx/emqx:5.0.24
     mem_limit: 500m
-  gmqtt:
-    image: gmqtt/gmqttd:v0.2.2
-    mem_limit: 500m
   hivemq:
     image: hivemq/hivemq4:4.8.12
     mem_limit: 3000m
