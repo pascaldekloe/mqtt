@@ -781,7 +781,7 @@ func (c *Client) peekPacket() (head byte, err error) {
 
 	// slice payload form read buffer
 	for {
-		if c.bufr.Buffered() < size {
+		if c.bufr.Buffered() < size && c.PauseTimeout != 0 {
 			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 			if err != nil {
 				return 0, err // deemed critical
@@ -1170,23 +1170,23 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 // The next ReadSlices will acknowledge reception either way.
 type BigMessage struct {
 	*Client        // source
-	Topic   string // destinition
+	Topic   string // destination
 	Size    int    // byte count
 }
 
 // Error implements the standard error interface.
 func (e *BigMessage) Error() string {
-	return fmt.Sprintf("mqtt: %d B message exceeds read buffer capacity", e.Size)
+	return fmt.Sprintf("mqtt: %d-byte message exceeds read buffer capacity", e.Size)
 }
 
 // ReadAll returns the message in a new/dedicated buffer. Messages can be read
 // only once, after reception (from ReadSlices), and before the next ReadSlices.
-// The invocation must occur from within the same routine.
+// The invocation must occur from within the same goroutine.
 func (e *BigMessage) ReadAll() ([]byte, error) {
-	if e.bigMessage != e {
+	if e.Client.bigMessage != e {
 		return nil, errors.New("mqtt: read window expired for a big message")
 	}
-	e.bigMessage = nil
+	e.Client.bigMessage = nil
 
 	message := make([]byte, e.Size)
 	_, err := io.ReadFull(e.Client.bufr, message)
