@@ -116,6 +116,12 @@ func testRoundtrip(t *testing.T, host string) {
 		AtLeastOnceMax: 9,
 		ExactlyOnceMax: 9,
 	}
+	switch host {
+	case "volantmq":
+		config.UserName = "testuser"
+		config.Password = []byte("testpassword")
+	}
+
 	client, err := mqtt.VolatileSession(t.Name(), &config)
 	if err != nil {
 		t.Fatal("client instantiation:", err)

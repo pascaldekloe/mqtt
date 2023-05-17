@@ -8,7 +8,7 @@ services:
     command: go test -v -race
     working_dir: /code/integration
     environment:
-      - MQTT_HOSTS=emqx gmqtt hivemq hmq mosquitto vernemq
+      - MQTT_HOSTS=emqx hivemq hmq mosquitto vernemq volantmq
 
   emqx:
     image: emqx/emqx:5.0.24
@@ -28,3 +28,6 @@ services:
     environment:
       - DOCKER_VERNEMQ_ACCEPT_EULA=yes
       - DOCKER_VERNEMQ_ALLOW_ANONYMOUS=on
+  volantmq:
+    image: volantmq/volantmq:v0.2.5
+    mem_limit: 500m
