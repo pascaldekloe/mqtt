@@ -14,7 +14,7 @@ services:
     image: emqx/emqx:5.0.24
     mem_limit: 500m
   hivemq:
-    image: hivemq/hivemq4:4.8.12
+    image: hivemq/hivemq-ce:2024.3
     mem_limit: 3000m
   hmq:
     image: habakke/hmq:2.0.57
