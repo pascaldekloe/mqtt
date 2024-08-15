@@ -159,7 +159,7 @@ func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Clien
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
-		Dialer:         newTestDialer(t, clientConns...),
+		Dialer:         newDialerMock(t, 0, clientConns...),
 	})
 	if err != nil {
 		t.Fatal("volatile session error:", err)
@@ -176,9 +176,9 @@ func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Clien
 
 var errLastTestConn = errors.New("Dialer mock exhausted: all connections served")
 
-// NewTestDialer returns a new dialer which returns the conns in order of
+// NewDialerMock returns a new dialer which returns the conns in order of
 // appearance. The test fails on fewer dials.
-func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
+func newDialerMock(t *testing.T, delay time.Duration, conns ...net.Conn) mqtt.Dialer {
 	t.Helper()
 
 	var dialN atomic.Uint64
@@ -196,6 +196,8 @@ func newTestDialer(t *testing.T, conns ...net.Conn) mqtt.Dialer {
 		if n > uint64(len(conns)) {
 			return nil, errLastTestConn
 		}
+
+		time.Sleep(delay)
 		return conns[n-1], nil
 	}
 }

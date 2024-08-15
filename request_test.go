@@ -277,7 +277,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
-		Dialer:         newTestDialer(t, clientConn),
+		Dialer:         newDialerMock(t, 0, clientConn),
 	})
 	if err != nil {
 		t.Fatal("InitSession error:", err)
@@ -359,7 +359,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
-		Dialer:         newTestDialer(t, clientConn),
+		Dialer:         newDialerMock(t, 0, clientConn),
 	})
 	if err != nil {
 		t.Fatal("AdoptSession error:", err)
@@ -484,7 +484,7 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		ExactlyOnceMax: 5,
-		Dialer:         newTestDialer(t, clientConn),
+		Dialer:         newDialerMock(t, 0, clientConn),
 	})
 	if err != nil {
 		t.Fatal("InitSession error:", err)
@@ -607,7 +607,7 @@ func TestPublishExactlyOnceRestart(t *testing.T) {
 	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		ExactlyOnceMax: 4,
-		Dialer:         newTestDialer(t, clientConn),
+		Dialer:         newDialerMock(t, 0, clientConn),
 	})
 	for _, err := range warn {
 		t.Error("AdoptSession warning:", err)
