@@ -177,7 +177,7 @@ func TestPublishAtLeastOnce(t *testing.T) {
 			0, 5, 'g', 'r', 'e', 'e', 't',
 			0x80, 0x00, // packet identifier
 			'h', 'e', 'l', 'l', 'o'}))
-		sendPacketHex(t, conn, "40028000") // SUBACK
+		sendPacketHex(t, conn, "40028000") // PUBACK
 	})
 
 	exchange, err := client.PublishAtLeastOnce([]byte("hello"), "greet")
@@ -238,7 +238,7 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 			0, 1, 'y',
 			0x80, 0x00, // packet identifier
 			'x'}))
-		sendPacketHex(t, conns[1], "40028000") // SUBACK after all
+		sendPacketHex(t, conns[1], "40028000") // PUBACK after all
 	})
 
 	exchange, err := client.PublishAtLeastOnce([]byte{'x'}, "y")
@@ -292,7 +292,7 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	brokerMockDone := testRoutine(t, func() {
 		wantPacketHex(t, brokerConn, publish1)
 		wantPacketHex(t, brokerConn, publish2)
-		sendPacketHex(t, brokerConn, "40028000") // SUBACK № 1
+		sendPacketHex(t, brokerConn, "40028000") // PUBACK № 1
 
 		var buf [1]byte
 		switch _, err := io.ReadFull(brokerConn, buf[:]); {
@@ -373,18 +373,18 @@ func TestPublishAtLeastOnceRestart(t *testing.T) {
 	sendPacketHex(t, brokerConn, "20020000") // CONNACK
 	wantPacketHex(t, brokerConn, publish2Dupe)
 	wantPacketHex(t, brokerConn, publish3Dupe)
-	sendPacketHex(t, brokerConn, "40028001") // SUBACK № 2
-	sendPacketHex(t, brokerConn, "40028002") // SUBACK № 3
+	sendPacketHex(t, brokerConn, "40028001") // PUBACK № 2
+	sendPacketHex(t, brokerConn, "40028002") // PUBACK № 3
 
-	// await SUBACK appliance
+	// await PUBACK appliance
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(publish2File); err == nil {
-		t.Error("publish № 2 file exits after SUBACK", err)
+		t.Error("publish № 2 file exits after PUBACK", err)
 	} else if !os.IsNotExist(err) {
 		t.Error("publish № 2 file error:", err)
 	}
 	if _, err := os.Stat(publish3File); err == nil {
-		t.Error("publish № 3 file exits after SUBACK", err)
+		t.Error("publish № 3 file exits after PUBACK", err)
 	} else if !os.IsNotExist(err) {
 		t.Error("publish № 3 file error:", err)
 	}
