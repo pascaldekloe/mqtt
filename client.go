@@ -275,22 +275,29 @@ type Client struct {
 
 // Outbound submission may face multiple goroutines.
 type outbound struct {
-	seqSem chan seq // sequence semaphore singleton
+	// The sequence semaphore is a singleton instance.
+	seqSem chan seq
 
-	// Acknowledgement is traced with a callback channel.
-	// Insertion requires seqSem. Close requires connSem.
-	q chan chan<- error
+	// Acknowledgement is traced with a callback channel per request.
+	// Insertion requires a seqSem lock as the queue order must match its
+	// respective sequence number. Close of the queue requires connSem to
+	// prevent panic on double close [race].
+	queue chan chan<- error
 }
 
 // Sequence tracks outbound submission.
 type seq struct {
-	// Sequence number n applies to the next submission, starting with zero.
-	// Its value is used to calculate the respective MQTT packet identifier.
-	n uint
+	// AcceptN has the sequence number for the next submission. Counting
+	// starts at zero. The value is used to calculate the respective MQTT
+	// packet identifiers.
 
-	// When backlog is less than n, then packets since backlog until n - 1
-	// await submission. This may happen during connection absence.
-	backlog uint
+	// Packets are accepted once they are persisted. The count is used as a
+	// sequence number (starting with zero) in packet identifiers.
+	acceptN uint
+
+	// Any packets between submitN and acceptN are still pending network
+	// submission. Such backlog may happen due to connectivity failure.
+	submitN uint
 }
 
 func newClient(p Persistence, config *Config) *Client {
@@ -301,7 +308,7 @@ func newClient(p Persistence, config *Config) *Client {
 		config.ExactlyOnceMax = publishIDMask + 1
 	}
 
-	c := &Client{
+	c := Client{
 		Config:      *config, // copy
 		persistence: p,
 		onlineSig:   make(chan chan struct{}, 1),
@@ -310,12 +317,12 @@ func newClient(p Persistence, config *Config) *Client {
 		writeSem:    make(chan net.Conn, 1),
 		pingAck:     make(chan chan<- error, 1),
 		atLeastOnce: outbound{
-			seqSem: make(chan seq, 1),
-			q:      make(chan chan<- error, config.AtLeastOnceMax),
+			seqSem: make(chan seq, 1), // must singleton
+			queue:  make(chan chan<- error, config.AtLeastOnceMax),
 		},
 		exactlyOnce: outbound{
-			seqSem: make(chan seq, 1),
-			q:      make(chan chan<- error, config.ExactlyOnceMax),
+			seqSem: make(chan seq, 1), // must singleton
+			queue:  make(chan chan<- error, config.ExactlyOnceMax),
 		},
 		unorderedTxs: unorderedTxs{
 			perPacketID: make(map[uint16]unorderedCallback),
@@ -332,9 +339,9 @@ func newClient(p Persistence, config *Config) *Client {
 	c.writeSem <- connPending
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
-	c.atLeastOnce.seqSem <- seq{backlog: ^uint(0)}
-	c.exactlyOnce.seqSem <- seq{backlog: ^uint(0)}
-	return c
+	c.atLeastOnce.seqSem <- seq{}
+	c.exactlyOnce.seqSem <- seq{}
+	return &c
 }
 
 // Close terminates the connection establishment.
@@ -446,8 +453,9 @@ func (c *Client) termCallbacks() {
 
 		// flush queue
 		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
-		close(c.atLeastOnce.q)
-		for ch := range c.atLeastOnce.q {
+		// seqSem lock required for close:
+		close(c.atLeastOnce.queue)
+		for ch := range c.atLeastOnce.queue {
 			ch <- err // won't block
 		}
 	}()
@@ -464,8 +472,9 @@ func (c *Client) termCallbacks() {
 
 		// flush queue
 		err := fmt.Errorf("%w; PUBLISH not confirmed", ErrClosed)
-		close(c.exactlyOnce.q)
-		for ch := range c.exactlyOnce.q {
+		// seqSem lock required for close:
+		close(c.exactlyOnce.queue)
+		for ch := range c.exactlyOnce.queue {
 			ch <- err // won't block
 		}
 	}()
@@ -939,9 +948,11 @@ func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error)
 	return conn, bufr, nil
 }
 
-// Resend submits any and all pending since seqNoOffset.
+// Resend submits any and all pending since seqNoOffset. Sequence numbers count
+// from zero. Each sequence number is one less than the respective accept count
+// was at the time.
 func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) error {
-	for seqNo := seqNoOffset; seqNo < seq.n; seqNo++ {
+	for seqNo := seqNoOffset; seqNo < seq.acceptN; seqNo++ {
 		key := seqNo&publishIDMask | space
 		packet, err := c.persistence.Load(uint(key))
 		if err != nil {
@@ -951,7 +962,7 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 			return fmt.Errorf("mqtt: persistence key %#04x gone missing 👻", key)
 		}
 
-		if seqNo < seq.backlog && packet[0]>>4 == typePUBLISH {
+		if seqNo < seq.submitN && packet[0]>>4 == typePUBLISH {
 			packet[0] |= dupeFlag
 		}
 
@@ -959,11 +970,11 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 		if err != nil {
 			return err
 		}
-		if seqNo >= seq.backlog {
-			seq.backlog = seqNo + 1
+
+		if seqNo >= seq.submitN {
+			seq.submitN = seqNo + 1
 		}
 	}
-
 	return nil
 }
 

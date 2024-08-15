@@ -249,15 +249,24 @@ func TestPublishAtLeastOnceResend(t *testing.T) {
 	<-brokerMockDone
 }
 
-// A Client must send pending PUBLISH once reconnected.
+// A Client must send pending PUBLISH once reconnected and continue.
 func TestPublishAtLeastOnceWhileDown(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	testTimeout := ctx.Done()
 
 	clientConn0, brokerConn0 := net.Pipe()
 	clientConn1, brokerConn1 := net.Pipe()
+
+	// test expiry
+	testTimeout := make(chan struct{})
+	expire := time.AfterFunc(2*time.Second, func() {
+		t.Error("test timed out")
+		close(testTimeout)
+
+		clientConn0.Close()
+		clientConn1.Close()
+	})
+	defer expire.Stop()
+
 	client, err := mqtt.VolatileSession("test-client", &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
@@ -283,21 +292,45 @@ func TestPublishAtLeastOnceWhileDown(t *testing.T) {
 		t.Fatal("PublishAtLeastOnce error:", err)
 	}
 	select {
-	case err := <-exchange:
+	case err, ok := <-exchange:
+		if !ok {
+			t.Fatal("exchange completed without connection")
+		}
 		if !errors.Is(err, mqtt.ErrDown) {
-			t.Fatalf("got exchange error %q, want a mqtt.ErrDown", err)
+			t.Fatalf("exchange got error %q, want a mqtt.ErrDown", err)
 		}
 	case <-testTimeout:
 		t.Fatal("test timeout while awaiting publish exchange without connection")
 	}
 
-	// reconnect and receive
+	// schedule second publish for after reconnect
+	secondPublishDone := testRoutine(t, func() {
+		time.Sleep(time.Second / 2)
+
+		exchange, err := client.PublishAtLeastOnce([]byte("a"), "b")
+		if err != nil {
+			t.Fatal("PublishAtLeastOnce error:", err)
+		}
+		select {
+		case err, ok := <-exchange:
+			if ok {
+				t.Fatalf("second exchange got error %q", err)
+			}
+		case <-testTimeout:
+			t.Fatal("test timeout while awaiting second publish exchange")
+		}
+	})
+
+	// mock broker reconnect, delayed receive and receive continue
 	testRoutine(t, func() {
 		// CONNECT
 		wantPacketHex(t, brokerConn1, "101700044d51545404000000000b746573742d636c69656e74")
 		sendPacketHex(t, brokerConn1, "20020000")         // CONNACK
 		wantPacketHex(t, brokerConn1, "3206000179800078") // PUBLISH (enqueued)
 		sendPacketHex(t, brokerConn1, "40028000")         // PUBACK
+
+		wantPacketHex(t, brokerConn1, "3206000162800161") // PUBLISH (second)
+		sendPacketHex(t, brokerConn1, "40028001")         // PUBACK
 
 		brokerConn1.Close() // causes EOF next
 	})
@@ -307,13 +340,21 @@ func TestPublishAtLeastOnceWhileDown(t *testing.T) {
 			message, topic, err)
 	}
 
+	// first publish should recover and complete
 	select {
 	case err, ok := <-exchange:
 		if ok {
-			t.Errorf("got exchange error %q, want channel close", err)
+			t.Errorf("first exchange got error %q, want channel close", err)
 		}
 	case <-testTimeout:
-		t.Fatal("test timeout while awaiting publish exchange completion")
+		t.Fatal("test timeout while awaiting first publish exchange completion")
+	}
+
+	select {
+	case <-secondPublishDone:
+		break // OK
+	case <-testTimeout:
+		t.Fatal("test timeout while awaiting second publish routine")
 	}
 }
 

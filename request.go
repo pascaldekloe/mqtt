@@ -455,7 +455,7 @@ func (c *Client) PublishAtLeastOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, &c.atLeastOnce)
+	return c.submitPersisted(packet, c.atLeastOnce)
 }
 
 // PublishAtLeastOnceRetained is like PublishAtLeastOnce, but the broker must
@@ -470,7 +470,7 @@ func (c *Client) PublishAtLeastOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, &c.atLeastOnce)
+	return c.submitPersisted(packet, c.atLeastOnce)
 }
 
 // PublishExactlyOnce delivers the message with an “exactly once” guarantee.
@@ -483,7 +483,7 @@ func (c *Client) PublishExactlyOnce(message []byte, topic string) (exchange <-ch
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, &c.exactlyOnce)
+	return c.submitPersisted(packet, c.exactlyOnce)
 }
 
 // PublishExactlyOnceRetained is like PublishExactlyOnce, but the broker must
@@ -498,50 +498,47 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (excha
 	if err != nil {
 		return nil, err
 	}
-	return c.submitPersisted(packet, &c.exactlyOnce)
+	return c.submitPersisted(packet, c.exactlyOnce)
 }
 
-func (c *Client) submitPersisted(packet net.Buffers, out *outbound) (exchange <-chan error, err error) {
+func (c *Client) submitPersisted(packet net.Buffers, out outbound) (exchange <-chan error, err error) {
 	// lock sequence
 	seq, ok := <-out.seqSem
 	if !ok {
 		return nil, ErrClosed
 	}
 	defer func() {
-		out.seqSem <- seq // unlock
+		out.seqSem <- seq // unlock with updated
 	}()
 
+	hasBacklog := seq.submitN < seq.acceptN
+
 	// persist
-	done, err := c.applySeqNoAndEnqueue(packet, seq.n, out)
+	done, err := c.applySeqNoAndEnqueue(packet, seq.acceptN, out)
 	if err != nil {
 		return nil, err
 	}
-	seq.n++
+	seq.acceptN++
 
 	// submit
-	if seq.backlog < seq.n {
+	if hasBacklog {
 		// buffered channel won't block
 		done <- fmt.Errorf("%w; PUBLISH enqueued", ErrDown)
 	} else {
-
 		err = c.writeBuffersNoWait(packet)
 		if err != nil {
-			// start backlog
-			seq.backlog = seq.n
-			if err == ErrDown {
-				seq.backlog--
-			}
-
 			// buffered channel won't block
 			done <- fmt.Errorf("%w; PUBLISH enqueued", err)
+		} else {
+			seq.submitN = seq.acceptN
 		}
 	}
 
 	return done, nil
 }
 
-func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, out *outbound) (done chan error, err error) {
-	if cap(out.q) == len(out.q) {
+func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, out outbound) (done chan error, err error) {
+	if cap(out.queue) == len(out.queue) {
 		return nil, fmt.Errorf("%w; PUBLISH unavailable", ErrMax)
 	}
 
@@ -558,7 +555,7 @@ func (c *Client) applySeqNoAndEnqueue(packet net.Buffers, seqNo uint, out *outbo
 	}
 
 	done = make(chan error, 2) // receives at most 1 write error + ErrClosed
-	out.q <- done              // won't block due ErrMax check
+	out.queue <- done          // won't block due ErrMax check
 	return done, nil
 }
 
@@ -605,7 +602,7 @@ func (c *Client) onPUBACK() error {
 		return errPacketIDSpace
 	case expect != packetID:
 		return fmt.Errorf("%w: PUBACK %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case len(c.atLeastOnce.q) == 0:
+	case len(c.atLeastOnce.queue) == 0:
 		return fmt.Errorf("%w: PUBACK precedes PUBLISH", errProtoReset)
 	}
 
@@ -615,7 +612,7 @@ func (c *Client) onPUBACK() error {
 		return err // causes resubmission of PUBLISH
 	}
 	c.orderedTxs.Acked++
-	close(<-c.atLeastOnce.q)
+	close(<-c.atLeastOnce.queue)
 	return nil
 }
 
@@ -636,7 +633,7 @@ func (c *Client) onPUBREC() error {
 		return errPacketIDSpace
 	case packetID != expect:
 		return fmt.Errorf("%w: PUBREC %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case int(c.Received-c.Completed) >= len(c.exactlyOnce.q):
+	case int(c.Received-c.Completed) >= len(c.exactlyOnce.queue):
 		return fmt.Errorf("%w: PUBREC precedes PUBLISH", errProtoReset)
 	}
 
@@ -674,7 +671,7 @@ func (c *Client) onPUBCOMP() error {
 		return errPacketIDSpace
 	case packetID != expect:
 		return fmt.Errorf("%w: PUBCOMP %#04x while %#04x next in line", errProtoReset, packetID, expect)
-	case c.orderedTxs.Completed >= c.orderedTxs.Received || len(c.exactlyOnce.q) == 0:
+	case c.orderedTxs.Completed >= c.orderedTxs.Received || len(c.exactlyOnce.queue) == 0:
 		return fmt.Errorf("%w: PUBCOMP precedes PUBREL", errProtoReset)
 	}
 
@@ -684,7 +681,7 @@ func (c *Client) onPUBCOMP() error {
 		return err // causes resubmission of PUBREL (from Persistence)
 	}
 	c.orderedTxs.Completed++
-	close(<-c.exactlyOnce.q)
+	close(<-c.exactlyOnce.queue)
 	return nil
 }
 
@@ -836,13 +833,19 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 			last += publishIDMask + 1
 		}
 		seq := <-client.atLeastOnce.seqSem
-		seq.n = last + 1
+		seq.acceptN = last + 1
+		// BUG(pascaldekloe):
+		//  AdoptSession assumes that all publish-at-least-once packets
+		//  were submitted before already. Persisting the actual state
+		//  after each network submission seems like too much just for
+		//  the DUP flag to be slightly more precise.
+		seq.submitN = seq.acceptN
 		client.atLeastOnce.seqSem <- seq
 	}
 
 	// install exactly-once sequence counters
 	if publishKeys, releaseKeys := publishExactlyOnceKeys, publishReleaseKeys; len(publishKeys) != 0 || len(releaseKeys) != 0 {
-		// txs.Completed ≤ txs.Received ≤ seq.N
+		// txs.Completed ≤ txs.Received ≤ seq.acceptN
 		txs := &client.orderedTxs
 		if len(releaseKeys) == 0 {
 			txs.Completed = publishKeys[0] & publishIDMask
@@ -858,27 +861,33 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 
 		var last uint
 		if len(publishKeys) != 0 {
-			last = publishKeys[len(publishKeys)-1]
+			last = publishKeys[len(publishKeys)-1] & publishIDMask
 		} else {
-			last = releaseKeys[len(releaseKeys)-1]
+			last = releaseKeys[len(releaseKeys)-1] & publishIDMask
 		}
 		seq := <-client.exactlyOnce.seqSem
-		seq.n = last&publishIDMask + 1
-		if seq.n < txs.Received {
-			seq.n += publishIDMask + 1 // address space overflow
+		seq.acceptN = last + 1
+		if seq.acceptN < txs.Received {
+			seq.acceptN += publishIDMask + 1 // address space overflow
 		}
+		// BUG(pascaldekloe):
+		//  AdoptSession assumes that all publish-exactly-once packets
+		//  were submitted before already. Persisting the actual state
+		//  after each network submission seems like too much just for
+		//  the DUP flag to be slightly more precise.
+		seq.submitN = seq.acceptN
 		client.exactlyOnce.seqSem <- seq
 	}
 
 	// install callback placeholders; won't block due Max check above
 	for range publishAtLeastOnceKeys {
-		client.atLeastOnce.q <- make(chan<- error, 1)
+		client.atLeastOnce.queue <- make(chan<- error, 1)
 	}
 	for range publishExactlyOnceKeys {
-		client.exactlyOnce.q <- make(chan<- error, 1)
+		client.exactlyOnce.queue <- make(chan<- error, 1)
 	}
 	for range publishReleaseKeys {
-		client.exactlyOnce.q <- make(chan<- error, 1)
+		client.exactlyOnce.queue <- make(chan<- error, 1)
 	}
 
 	return client, warn, nil
