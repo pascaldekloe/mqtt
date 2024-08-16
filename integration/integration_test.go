@@ -67,14 +67,14 @@ func sendBatch(t testing.TB, publish func([]byte, string) (<-chan error, error),
 func receiveBatch(t testing.TB, messages <-chan uint64, offset uint64) {
 	for i := uint64(0); i < batchSize; i++ {
 		got, ok := <-messages
-			want := offset + i
-			if !ok {
-				t.Errorf("receive stopped, want message # %d", want)
-				return
-			}
-			if got != want {
-				t.Errorf("got message # %d, want # %d", got, want)
-			}
+		want := offset + i
+		if !ok {
+			t.Errorf("receive stopped, want message # %d", want)
+			return
+		}
+		if got != want {
+			t.Errorf("got message # %d, want # %d", got, want)
+		}
 	}
 }
 
