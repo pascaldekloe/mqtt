@@ -802,7 +802,7 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	sort.Slice(publishReleaseKeys, func(i, j int) (less bool) {
 		return storeOrderPerKey[publishReleaseKeys[i]] < storeOrderPerKey[publishReleaseKeys[j]]
 	})
-	// verify continuous sequence
+	// ensure continuous sequence
 	publishAtLeastOnceKeys = cleanSequence(publishAtLeastOnceKeys, "PUBLISH at-least-once", &warn)
 	publishExactlyOnceKeys = cleanSequence(publishExactlyOnceKeys, "PUBLISH exactly-once", &warn)
 	publishReleaseKeys = cleanSequence(publishReleaseKeys, "PUBREL", &warn)
@@ -824,12 +824,15 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 	}
 	client = newClient(&ruggedPersistence{Persistence: p}, c)
 
-	// install at-least-once sequence counters
+	// check for outbound publish pending confirmation
 	if keys = publishAtLeastOnceKeys; len(keys) != 0 {
+		// install sequence counts; txs.Acked < seq.acceptN
+		// and: seq.acceptN − txs.Acked ≤ publishIDMask
+
 		client.orderedTxs.Acked = keys[0] & publishIDMask
 		last := keys[len(keys)-1] & publishIDMask
 		if last < client.orderedTxs.Acked {
-			// pending range overflows address space
+			// range overflows address space
 			last += publishIDMask + 1
 		}
 		seq := <-client.atLeastOnce.seqSem
@@ -843,19 +846,22 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		client.atLeastOnce.seqSem <- seq
 	}
 
-	// install exactly-once sequence counters
+	// check for outbound publish pending confirmation
 	if publishKeys, releaseKeys := publishExactlyOnceKeys, publishReleaseKeys; len(publishKeys) != 0 || len(releaseKeys) != 0 {
-		// txs.Completed ≤ txs.Received ≤ seq.acceptN
+		// install sequence counts; txs.Completed < seq.acceptN
+		// and: txs.Completed ≤ txs.Received ≤ seq.acceptN
+		// and: seq.acceptN − txs.Completed ≤ publishIDMask
+
 		txs := &client.orderedTxs
-		if len(releaseKeys) == 0 {
+		if len(releaseKeys) == 0 { // implies len(publishKeys) != 0
 			txs.Completed = publishKeys[0] & publishIDMask
 			txs.Received = txs.Completed
 		} else {
 			txs.Completed = releaseKeys[0] & publishIDMask
 			txs.Received = releaseKeys[len(releaseKeys)-1]&publishIDMask + 1
 			if txs.Received < txs.Completed {
-				// pending range overflows address space
-				txs.Completed += publishIDMask + 1
+				// range overflows address space
+				txs.Received += publishIDMask + 1
 			}
 		}
 
@@ -865,11 +871,12 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		} else {
 			last = releaseKeys[len(releaseKeys)-1] & publishIDMask
 		}
+		if last < txs.Received {
+			// range overflows address space
+			last += publishIDMask + 1
+		}
 		seq := <-client.exactlyOnce.seqSem
 		seq.acceptN = last + 1
-		if seq.acceptN < txs.Received {
-			seq.acceptN += publishIDMask + 1 // address space overflow
-		}
 		// BUG(pascaldekloe):
 		//  AdoptSession assumes that all publish-exactly-once packets
 		//  were submitted before already. Persisting the actual state
