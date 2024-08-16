@@ -244,7 +244,7 @@ type Client struct {
 	bufr     *bufio.Reader // readConn buffered
 	peek     []byte        // pending slice from bufio.Reader
 
-	// Context is applied durring connect for faster aborts.
+	// Context is applied during connect for faster aborts.
 	ctx    context.Context
 	cancel context.CancelFunc // Close may cancel the context
 
@@ -354,7 +354,7 @@ func (c *Client) Close() error {
 	// block connection control
 	conn, ok := <-c.connSem
 	if !ok {
-		// allready closed
+		// already closed
 		return nil
 	}
 	defer func() {
