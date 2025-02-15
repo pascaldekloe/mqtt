@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -232,6 +233,11 @@ func (c *Config) newCONNREQ(clientID []byte) []byte {
 // ReadSlices.
 type Client struct {
 	Config // read-only
+
+	// InNewSession is flagged when a (re)connect confirms a CleanSession
+	// request. InNewSession is also flagged when a (re)connect states that
+	// the server has no stored session state for the client identifier.
+	InNewSession atomic.Bool
 
 	persistence Persistence // tracks the session
 
@@ -890,12 +896,10 @@ func (c *Client) connect() error {
 }
 
 func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error) {
-	// connect request packet
 	clientID, err := c.persistence.Load(clientIDKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	packet := config.newCONNREQ(clientID)
 
 	// network connection
 	ctx := c.ctx
@@ -931,7 +935,7 @@ func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error)
 		}
 	}()
 
-	bufr, err := c.handshake(conn, packet)
+	bufr, err := c.handshake(conn, config, clientID)
 	// ⚠️ delayed error check
 
 	done <- struct{}{}
@@ -978,15 +982,16 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 	return nil
 }
 
-func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, error) {
-	err := write(conn, requestPacket, c.PauseTimeout)
+func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*bufio.Reader, error) {
+	// send request
+	err := write(conn, config.newCONNREQ(clientID), c.PauseTimeout)
 	if err != nil {
 		return nil, err
 	}
 
 	r := bufio.NewReaderSize(conn, readBufSize)
 
-	// Apply the deadline to the "entire" 4-byte response.
+	// Apply the timeout to the "entire" 4-byte response.
 	if c.PauseTimeout != 0 {
 		err := conn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
 		if err != nil {
@@ -999,21 +1004,51 @@ func (c *Client) handshake(conn net.Conn, requestPacket []byte) (*bufio.Reader, 
 	// CONNACK Packet.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.2.0-1
 	packet, err := r.Peek(4)
-	switch {
-	case len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2):
+	// A smaller packet may cause timeout errors. 😉
+	if len(packet) > 1 && (packet[0] != typeCONNACK<<4 || packet[1] != 2) {
 		return nil, fmt.Errorf("%w: want fixed CONNACK header 0x2002, got %#x", errProtoReset, packet)
-	case len(packet) > 3 && connectReturn(packet[3]) != accepted:
-		return nil, connectReturn(packet[3])
-	case err == nil:
-		r.Discard(len(packet)) // no errors guaranteed
-		return r, nil
-	case errors.Is(err, io.EOF): // doesn't match io.ErrUnexpectedEOF
-		err = errBrokerTerm
 	}
-	if len(packet) != 4 {
-		err = fmt.Errorf("%w; CONNECT not confirmed", err)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			err = errBrokerTerm
+		}
+		return nil, fmt.Errorf("%w; CONNECT not confirmed", err)
 	}
-	return nil, err
+
+	// Codes other than accepted indicate rejection.
+	if r := connectReturn(packet[3]); r != accepted {
+		return nil, r
+	}
+
+	// CONNACK flags
+	switch flags := packet[2]; flags {
+	// “Bits 7-1 are reserved and MUST be set to 0.”
+	default:
+		return nil, fmt.Errorf("%w: CONNACK with reserved flags %b",
+			errProtoReset, flags)
+
+	// no "session present"
+	case 0:
+		// “If the Server does not have stored Session state, it MUST
+		// set Session Present to 0 in the CONNACK packet.”
+		// — MQTT Version 3.1.1, conformance statement MQTT-3.2.2-3
+		c.InNewSession.Store(true)
+
+	// "session present"
+	case 1:
+		// “If the Server accepts a connection with CleanSession set to
+		// 1, the Server MUST set Session Present to 0 in the CONNACK …”
+		// — MQTT Version 3.1.1, conformance statement MQTT-3.2.2-1
+		if config.CleanSession {
+			return nil, fmt.Errorf("%w: CONNACK with session-present for clean-session request",
+				errProtoReset)
+		}
+
+		// don't clear InNewSession (on reconnects)
+	}
+
+	r.Discard(len(packet)) // no errors guaranteed
+	return r, nil
 }
 
 // ReadSlices should be invoked consecutively from a single goroutine until
