@@ -23,3 +23,6 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+
+    - name: Integration Test
+      run: docker-compose up --exit-code-from test
