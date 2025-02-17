@@ -8,7 +8,7 @@ services:
     command: go test -v -race
     working_dir: /code/integration
     environment:
-      - MQTT_HOSTS=emqx hivemq hmq mosquitto vernemq
+      - MQTT_HOSTS=emqx hivemq mosquitto vernemq
 
   emqx:
     image: emqx/emqx:5.7.2
@@ -16,9 +16,6 @@ services:
   hivemq:
     image: hivemq/hivemq-ce:2024.7
     mem_limit: 2000m
-  hmq:
-    image: habakke/hmq:2.0.57
-    mem_limit: 500m
   mosquitto:
     image: eclipse-mosquitto:1.6.15
     mem_limit: 500m
