@@ -1270,6 +1270,9 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		i += 2
 
 		// enqueue for next call
+		if len(c.pendingAck) != 0 {
+			return nil, nil, fmt.Errorf("mqtt: internal error: ack %#x pending during PUBLISH at least once reception", c.pendingAck)
+		}
 		c.pendingAck = append(c.pendingAck, typePUBACK<<4, 2, byte(packetID>>8), byte(packetID))
 
 	case exactlyOnceLevel << 1:
@@ -1291,6 +1294,9 @@ func (c *Client) onPUBLISH(head byte) (message, topic []byte, err error) {
 		}
 
 		// enqueue for next call
+		if len(c.pendingAck) != 0 {
+			return nil, nil, fmt.Errorf("mqtt: internal error: ack %#x pending during PUBLISH exactly once reception", c.pendingAck)
+		}
 		c.pendingAck = append(c.pendingAck, typePUBREC<<4, 2, byte(packetID>>8), byte(packetID))
 
 	default:
@@ -1315,7 +1321,10 @@ func (c *Client) onPUBREL() error {
 		return err // causes resubmission of PUBREL
 	}
 	// Use pendingAck as a buffer here.
-	c.pendingAck = append(c.pendingAck[:0], typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
+	if len(c.pendingAck) != 0 {
+		return fmt.Errorf("mqtt: internal error: ack %#x pending during PUBREL reception", c.pendingAck)
+	}
+	c.pendingAck = append(c.pendingAck, typePUBCOMP<<4, 2, byte(packetID>>8), byte(packetID))
 	err = c.write(nil, c.pendingAck)
 	if err != nil {
 		return err // causes resubmission of PUBCOMP
