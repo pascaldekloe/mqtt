@@ -109,6 +109,7 @@ func testRoundtrip(t *testing.T, host string) {
 	const messageN = 16384 + batchSize // overflows mqtt.publishIDMask
 
 	// client instantiation
+	clientID := t.Name()
 	config := mqtt.Config{
 		Dialer:         mqtt.NewDialer("tcp", net.JoinHostPort(host, "1883")),
 		PauseTimeout:   time.Second,
@@ -116,16 +117,23 @@ func testRoundtrip(t *testing.T, host string) {
 		AtLeastOnceMax: 9,
 		ExactlyOnceMax: 9,
 	}
+
+	// target specifics
 	switch host {
 	case "activemq":
 		config.UserName = "artemis"
 		config.Password = []byte("artemis")
+
+	case "rumqttd":
+		config.KeepAlive = 20
+		clientID = strings.Replace(clientID, "/", "-", 1)
+
 	case "volantmq":
 		config.UserName = "testuser"
 		config.Password = []byte("testpassword")
 	}
 
-	client, err := mqtt.VolatileSession(t.Name(), &config)
+	client, err := mqtt.VolatileSession(clientID, &config)
 	if err != nil {
 		t.Fatal("client instantiation:", err)
 	}

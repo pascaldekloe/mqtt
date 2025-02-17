@@ -8,7 +8,7 @@ services:
     command: go test -v -race
     working_dir: /code/integration
     environment:
-      - MQTT_HOSTS=activemq emqx hivemq mosquitto vernemq
+      - MQTT_HOSTS=activemq emqx hivemq mosquitto rumqttd vernemq
 
   activemq:
     image: apache/activemq-artemis:2.39.0
@@ -22,6 +22,9 @@ services:
   mosquitto:
     image: eclipse-mosquitto:1.6.15
     mem_limit: 500m
+  rumqttd:
+    image: bytebeamio/rumqttd:0.19.0
+    mem_limit: 100m
   vernemq:
     image: vernemq/vernemq:1.13.0
     mem_limit: 1000m
