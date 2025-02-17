@@ -3,9 +3,11 @@ package integration
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,14 +102,12 @@ func exchangeN(t testing.TB, n uint64, publish func([]byte, string) (<-chan erro
 func TestRoundtrip(t *testing.T) {
 	for _, host := range hosts(t) {
 		t.Run(host, func(t *testing.T) {
-			testRoundtrip(t, host)
+			testRoundtripHost(t, host)
 		})
 	}
 }
 
-func testRoundtrip(t *testing.T, host string) {
-	const messageN = 16384 + batchSize // overflows mqtt.publishIDMask
-
+func testRoundtripHost(t *testing.T, host string) {
 	// client instantiation
 	clientID := t.Name()
 	config := mqtt.Config{
@@ -138,28 +138,46 @@ func testRoundtrip(t *testing.T, host string) {
 		t.Fatal("client instantiation:", err)
 	}
 
-	// read routine
+	testRoundtripClient(t, client)
+}
+
+func testRoundtripClient(t *testing.T, client *mqtt.Client) {
+	const messageN = 16384 + batchSize // overflows mqtt.publishIDMask
+
+	// receive streams
 	atMostOnceMessages := make(chan uint64)
 	atLeastOnceMessages := make(chan uint64)
 	exactlyOnceMessages := make(chan uint64)
-	go func() {
-		for {
-			defer close(atMostOnceMessages)
-			defer close(atLeastOnceMessages)
-			defer close(exactlyOnceMessages)
 
+	// The read routine continues until Client Close.
+	// Errors are discarded once the channel buffer is full.
+	readDone := make(chan error, 60)
+	go func() {
+		defer close(readDone)
+
+		defer close(atMostOnceMessages)
+		defer close(atLeastOnceMessages)
+		defer close(exactlyOnceMessages)
+
+		for {
 			message, topic, err := client.ReadSlices()
 			if err != nil {
-				t.Log(err)
 				if errors.Is(err, mqtt.ErrClosed) {
 					return
+				}
+				select {
+				case readDone <- err:
+				default: // discard
 				}
 				time.Sleep(time.Second / 2)
 				continue
 			}
 
 			if len(message) != 8 {
-				t.Errorf("unexpected message %#x on topic %q", message, topic)
+				select {
+				case readDone <- fmt.Errorf("unexpected message %#x on topic %q", message, topic):
+				default: // discard
+				}
 				continue
 			}
 			seqNo := binary.BigEndian.Uint64(message)
@@ -172,16 +190,25 @@ func testRoundtrip(t *testing.T, host string) {
 			case strings.HasSuffix(s, "/exactly-once"):
 				exactlyOnceMessages <- seqNo
 			default:
-				t.Errorf("message # %d on unexpected topic %q", seqNo, topic)
+				select {
+				case readDone <- fmt.Errorf("message # %d on unexpected topic %q", seqNo, topic):
+				default: // discard
+				}
 			}
 		}
 	}()
 
-	<-client.Online()
-	t.Log("client online")
+	// test each QoS in parallel
+	var testGroup sync.WaitGroup
+	testGroup.Add(3)
 
 	t.Run("at-most-once", func(t *testing.T) {
+		defer testGroup.Done()
 		t.Parallel()
+
+		<-client.Online()
+		t.Log("client online")
+
 		err := client.Subscribe(nil, t.Name())
 		if err != nil {
 			t.Fatal(err)
@@ -195,7 +222,12 @@ func testRoundtrip(t *testing.T, host string) {
 	})
 
 	t.Run("at-least-once", func(t *testing.T) {
+		defer testGroup.Done()
 		t.Parallel()
+
+		<-client.Online()
+		t.Log("client online")
+
 		err := client.Subscribe(nil, t.Name())
 		if err != nil {
 			t.Fatal(err)
@@ -204,11 +236,38 @@ func testRoundtrip(t *testing.T, host string) {
 	})
 
 	t.Run("exactly-once", func(t *testing.T) {
+		defer testGroup.Done()
 		t.Parallel()
+
+		<-client.Online()
+		t.Log("client online")
+
 		err := client.Subscribe(nil, t.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
 		exchangeN(t, messageN, client.PublishExactlyOnce, exactlyOnceMessages)
+	})
+
+	t.Run("clean-exit", func(t *testing.T) {
+		t.Parallel()
+
+		<-client.Online()
+		t.Log("client online")
+
+		testGroup.Wait()
+
+		t.Log("disconnect request")
+		err := client.Disconnect(nil)
+		if err != nil {
+			t.Error(err)
+		}
+
+		<-client.Offline()
+		t.Log("client offline")
+
+		for err := range readDone {
+			t.Error(err)
+		}
 	})
 }
