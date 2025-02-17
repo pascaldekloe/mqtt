@@ -25,4 +25,4 @@ jobs:
       run: go test -v ./...
 
     - name: Integration Test
-      run: cd integration && docker-compose up --exit-code-from test
+      run: cd integration && docker compose up --exit-code-from test
