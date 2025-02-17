@@ -117,6 +117,9 @@ func testRoundtrip(t *testing.T, host string) {
 		ExactlyOnceMax: 9,
 	}
 	switch host {
+	case "activemq":
+		config.UserName = "artemis"
+		config.Password = []byte("artemis")
 	case "volantmq":
 		config.UserName = "testuser"
 		config.Password = []byte("testpassword")
