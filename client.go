@@ -1065,10 +1065,8 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 // including BigMessage.
 //
 // BigMessage leaves memory allocation beyond the read buffer as a choice to the
-// consumer. Any error other than BigMessage puts the Client in an ErrDown state.
-// Invocation should apply a backoff once down. Retries on IsConnectionRefused,
-// if any, should probably apply a rather large backoff. See the Client example
-// for a complete setup.
+// consumer. Invocation should apply backoff after errors other than BigMessage,
+// especially when IsConnectionRefused. See the Client example for a setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	message, topic, err = c.readSlices()
 	switch {
@@ -1106,10 +1104,12 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 	// acknowledge previous packet, if any
 	if len(c.pendingAck) != 0 {
 		if c.pendingAck[0]>>4 == typePUBREC {
-			// BUG(pascaldekloe): Save errors from a Persistence may
-			// cause duplicate reception for deliveries with an
-			// “exactly once guarantee”, if the respective Client
-			// goes down before a recovery/retry succeeds.
+			// BUG(pascaldekloe):
+			//  Save errors from the Persistence can cause duplicate
+			//  reception for messages with “exactly once guarantee”
+			//  in a follow-up with AdoptSession, only if the Client
+			//  goes down before another ReadSlices succeeds without
+			//  error [automatic recovery].
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.persistence.Save(key, net.Buffers{c.pendingAck})
 			if err != nil {
