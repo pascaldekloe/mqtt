@@ -821,7 +821,41 @@ func (c *Client) peekPacket() (head byte, err error) {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
-		return 0, fmt.Errorf("mqtt: got %d out of %d bytes from packet %#b: %w", len(c.peek), size, head, err)
+		return 0, fmt.Errorf("mqtt: got %d out of %d bytes from packet %#b: %w",
+			len(c.peek), size, head, err)
+	}
+}
+
+// Discard skips n bytes from the network connection.
+func (c *Client) discard(n int) error {
+	if c.PauseTimeout != 0 {
+		// Abandon timer to prevent waking up the system for no good reason.
+		// https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/MinimizeTimerUse.html
+		defer c.readConn.SetReadDeadline(time.Time{})
+	}
+
+	for {
+		if c.PauseTimeout != 0 {
+			err := c.readConn.SetReadDeadline(time.Now().Add(c.PauseTimeout))
+			if err != nil {
+				return err // deemed critical
+			}
+		}
+
+		done, err := c.bufr.Discard(n)
+		if err == nil {
+			return nil
+		}
+
+		// Allow deadline expiry if at least one byte was transferred.
+		var ne net.Error
+		if done != 0 && errors.As(err, &ne) && ne.Timeout() {
+			n -= done
+			continue
+		}
+
+		return fmt.Errorf("mqtt: %d bytes remaining of packet discard: %w",
+			n, err)
 	}
 }
 
@@ -1079,27 +1113,28 @@ func (c *Client) ReadSlices() (message, topic []byte, err error) {
 }
 
 func (c *Client) readSlices() (message, topic []byte, err error) {
+	// auto connect
 	if c.readConn == nil {
 		if err = c.connect(); err != nil {
 			return nil, nil, err
 		}
 	}
 
+	// flush big message if any
 	if c.bigMessage != nil {
-		_, err = c.bufr.Discard(c.bigMessage.Size)
+		remaining := c.bigMessage.Size
+		c.bigMessage = nil
+
+		err = c.discard(remaining)
 		if err != nil {
 			c.toOffline()
 			return nil, nil, err
 		}
-
-		c.bigMessage = nil
 	}
 
-	if pending := len(c.peek); pending != 0 {
-		// skip previous packet, if any
-		c.bufr.Discard(pending) // no error guaranteed
-		c.peek = nil            // clear
-	}
+	// skip previous packet, if any
+	c.bufr.Discard(len(c.peek)) // no error guaranteed
+	c.peek = nil
 
 	// acknowledge previous packet, if any
 	if len(c.pendingAck) != 0 {
@@ -1141,19 +1176,31 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 			continue // with new connection
 
 		case errors.As(err, &c.bigMessage):
-			if head>>4 == typePUBLISH {
-				message, topic, err = c.onPUBLISH(head)
-				// TODO(pascaldekloe): errDupe
-				if err != nil {
+			// keys + topic under readBufSize thus in c.peek
+			partialMessage, topic, err := c.onPUBLISH(head)
+			if err != nil {
+				if err != errDupe {
 					c.toOffline()
 					return nil, nil, err
 				}
-				c.bigMessage.Topic = string(topic) // copy
-				done := readBufSize - len(message)
-				c.bigMessage.Size -= done
-				c.bufr.Discard(done) // no errors guaranteed
+
+				// can just skip the already received
+				payloadSize := c.bigMessage.Size
+				c.bigMessage = nil
+				c.peek = nil
+				err := c.discard(payloadSize)
+				if err != nil {
+					return nil, nil, err
+				}
+				continue
 			}
+
+			// serve big message (as error)
+			c.bigMessage.Topic = string(topic) // copy
+			beforeMessage := readBufSize - len(partialMessage)
+			c.bigMessage.Size -= beforeMessage
 			c.peek = nil
+			c.bufr.Discard(beforeMessage) // no errors guaranteed
 			return nil, nil, c.bigMessage
 
 		default:
@@ -1174,7 +1221,7 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 				return message, topic, nil
 			}
 			if err == errDupe {
-				err = nil // just skip
+				err = nil // can just skip
 			}
 		case typePUBACK:
 			err = c.onPUBACK()
