@@ -7,12 +7,22 @@ services:
       - ..:/code
     command: go test -v -race
     working_dir: /code/integration
+    depends_on:
+      activemq:
+        condition: service_healthy
     environment:
       - MQTT_HOSTS=activemq emqx hivemq mosquitto rumqttd vernemq
 
   activemq:
     image: apache/activemq-artemis:2.39.0
     mem_limit: 500m
+    # TCP "connection refused" error before HTTP service
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:8161"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
   emqx:
     image: emqx/emqx:5.7.2
     mem_limit: 500m
