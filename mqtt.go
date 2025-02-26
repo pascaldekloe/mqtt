@@ -153,12 +153,12 @@ type connectReturn byte
 const (
 	accepted connectReturn = iota
 
-	// ErrProtocolLevel means that the server does not support the level of
+	// ErrProtocolLevel means that the broker does not support the level of
 	// the MQTT protocol requested by the Client.
 	ErrProtocolLevel
 
 	// ErrClientID means that the client identifier is correct UTF-8 but not
-	// allowed by the Server.
+	// allowed by the broker.
 	ErrClientID
 
 	// ErrUnavailable means that the network connection has been made but

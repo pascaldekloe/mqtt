@@ -115,7 +115,7 @@ type Config struct {
 	}
 
 	// KeepAlive sets the activity timeout in seconds, with zero for none.
-	// The server must disconnect after no control-packet reception for one
+	// The broker must disconnect after no control-packet reception for one
 	// and a half times the keep-alive duration. Use Ping when idle.
 	KeepAlive uint16
 
