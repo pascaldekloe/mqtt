@@ -234,9 +234,9 @@ func (c *Config) newCONNREQ(clientID []byte) []byte {
 type Client struct {
 	Config // read-only
 
-	// InNewSession is flagged when a (re)connect confirms a CleanSession
-	// request. InNewSession is also flagged when a (re)connect states that
-	// the server has no stored session state for the client identifier.
+	// InNewSession gets flagged when the broker confirms a connect without
+	// “session present” [SP¹]. Users should await the Online channel before
+	// Load of the atomic.
 	InNewSession atomic.Bool
 
 	persistence Persistence // tracks the session
@@ -1049,26 +1049,22 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 		return nil, fmt.Errorf("%w; CONNECT not confirmed", err)
 	}
 
-	// Codes other than accepted indicate rejection.
+	// Check the return code first to prevent confusion with flag appliance.
+	//
+	// “If a server sends a CONNACK packet containing a non-zero return code
+	// it MUST set Session Present to 0.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-3.2.2-4
 	if r := connectReturn(packet[3]); r != accepted {
 		return nil, r
 	}
 
-	// CONNACK flags
 	switch flags := packet[2]; flags {
 	// “Bits 7-1 are reserved and MUST be set to 0.”
 	default:
-		return nil, fmt.Errorf("%w: CONNACK with reserved flags %b",
+		return nil, fmt.Errorf("%w: CONNACK with reserved flags %#b",
 			errProtoReset, flags)
 
-	// no "session present"
-	case 0:
-		// “If the Server does not have stored Session state, it MUST
-		// set Session Present to 0 in the CONNACK packet.”
-		// — MQTT Version 3.1.1, conformance statement MQTT-3.2.2-3
-		c.InNewSession.Store(true)
-
-	// "session present"
+	// “Bit 0 (SP1) is the Session Present Flag.”
 	case 1:
 		// “If the Server accepts a connection with CleanSession set to
 		// 1, the Server MUST set Session Present to 0 in the CONNACK …”
@@ -1079,6 +1075,9 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 		}
 
 		// don't clear InNewSession (on reconnects)
+
+	case 0:
+		c.InNewSession.Store(true)
 	}
 
 	r.Discard(len(packet)) // no errors guaranteed
