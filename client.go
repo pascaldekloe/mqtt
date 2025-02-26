@@ -1137,13 +1137,12 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 
 	// acknowledge previous packet, if any
 	if len(c.pendingAck) != 0 {
+		// BUG(pascaldekloe): Save errors from Persistence can cause
+		// duplicate reception of messages with the “exactly once”
+		// guarantee, but only in a follow-up with AdoptSession, and
+		// only if the Client which encountered Persistence failure
+		// goes down before automatic-recovery in ReadSlices succeded.
 		if c.pendingAck[0]>>4 == typePUBREC {
-			// BUG(pascaldekloe):
-			//  Save errors from the Persistence can cause duplicate
-			//  reception for messages with “exactly once guarantee”
-			//  in a follow-up with AdoptSession, only if the Client
-			//  goes down before another ReadSlices succeeds without
-			//  error [automatic recovery].
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.persistence.Save(key, net.Buffers{c.pendingAck})
 			if err != nil {
