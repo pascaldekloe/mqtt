@@ -11,12 +11,12 @@
 // Ping, Subscribe and Unsubscribe await response from the broker. ErrClosed,
 // ErrDown, ErrMax, ErrCanceled or an IsDeny [Subscribe and Unsubscribe only]
 // imply no request submission. ErrBreak and ErrAbandoned leave with the broker
-// response unknown. Subscribe responses may cause an SubscribeError. All other
-// errors imply that the request submission was interrupted by either a
+// response unknown. Subscribe responses may cause an SubscribeError. Any other
+// error implies that the request submission was interrupted by either a
 // connection failure or by a PauseTimeout appliance.
 //
 // PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence.
-// Errors [either ErrClosed, ErrMax, IsDeny, or a Save return] imply that the
+// Errors (either ErrClosed, ErrMax, IsDeny, or a Save return) imply that the
 // message was dropped. Once persisted, the client will execute the transfer
 // with endless retries, and report to the respective exchange channel.
 package mqtt

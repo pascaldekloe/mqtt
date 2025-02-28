@@ -100,7 +100,7 @@ func ExampleClient_setup() {
 	}()
 
 	// Install each method in use as a package variable. Such setup is
-	// compatible with the tools proveded from the mqtttest subpackage.
+	// compatible with the tools from the mqtttest subpackage.
 	Publish = client.Publish
 	// Output:
 }

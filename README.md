@@ -182,4 +182,5 @@ suited for IOT. The additions in version 5 may be more of a fit for backend
 computing.
 
 See the [Broker wiki](https://github.com/pascaldekloe/mqtt/wiki/Brokers) for
-implementation specifics, especially the AWS IoT users.
+implementation specifics. The most notable offender is AWS IoT. Additions to
+`integration/docker-compose.yml` are welcome.

@@ -232,14 +232,17 @@ func (c *Config) newCONNREQ(clientID []byte) []byte {
 // Multiple goroutines may invoke methods on a Client simultaneously, except for
 // ReadSlices.
 type Client struct {
-	Config // read-only
+	// The applied settings are read only.
+	Config
 
 	// InNewSession gets flagged when the broker confirms a connect without
-	// “session present” [SP¹]. Users should await the Online channel before
-	// Load of the atomic.
+	// without “session present”, a.k.a. the SP¹ indicator. Note how this
+	// includes any automatic reconnects after protocol or connection failure.
+	// Users should await the Online channel before Load of the atomic.
 	InNewSession atomic.Bool
 
-	persistence Persistence // tracks the session
+	// The session track is dedicated to the respective client identifier.
+	persistence Persistence
 
 	// Signal channels are closed once their respective state occurs.
 	// Each read must restore or replace the signleton value.
@@ -1085,20 +1088,21 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 }
 
 // ReadSlices should be invoked consecutively from a single goroutine until
-// ErrClosed. Both message and topic are slices from a read buffer. The bytes
-// stop being valid at the next read. Care must be taken to avoid freezing the
-// Client. Use any of the following techniques for blocking operations.
+// ErrClosed. Each invocation acknowledges ownership of the previous return.
 //
-//   - start a goroutine with a copy of message and/or topic
-//   - start a goroutine with the bytes parsed/unmarshalled
-//   - persist message and/or topic; then continue from there
-//   - apply low timeouts in a strict manner
+// Both message and topic are sliced from a read buffer. The bytes stop being
+// valid at the next read. BigMessage leaves memory allocation beyond the read
+// buffer as a choice to the consumer.
 //
-// Each invocation acknowledges ownership of the previous returned, if any,
-// including BigMessage.
+// Slow processing of the return may freeze the Client. Blocking operations
+// require counter measures for stability:
 //
-// BigMessage leaves memory allocation beyond the read buffer as a choice to the
-// consumer. Invocation should apply backoff after errors other than BigMessage,
+//   - Start a goroutine with a copy of message and/or topic.
+//   - Start a goroutine with the bytes parsed/unmarshalled.
+//   - Persist message and/or topic. Then, continue from there.
+//   - Apply low timeouts in a strict manner.
+//
+// Invocation should apply some backoff after errors other than BigMessage,
 // especially when IsConnectionRefused. See the Client example for a setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	message, topic, err = c.readSlices()
@@ -1271,8 +1275,8 @@ func (e *BigMessage) Error() string {
 }
 
 // ReadAll returns the message in a new/dedicated buffer. Messages can be read
-// only once, after reception (from ReadSlices), and before the next ReadSlices.
-// The invocation must occur from within the same goroutine.
+// once at most. Read fails on second attempt. Read also fails after followup by
+// another ReadSlices.
 func (e *BigMessage) ReadAll() ([]byte, error) {
 	if e.Client.bigMessage != e {
 		return nil, errors.New("mqtt: read window expired for a big message")

@@ -35,8 +35,8 @@ const bufSize = 128
 // The PUBLISH messages are not copied into these buffers.
 var bufPool = sync.Pool{New: func() interface{} { return new([bufSize]byte) }}
 
-// Ping makes a roundtrip to validate the connection.
-// Only one request is permitted [ErrMax] at a time.
+// Ping makes a roundtrip to validate the connection. Client allows only one
+// ping at a time. Redundant requests get ErrMax.
 //
 // Quit is optional, as nil just blocks. Appliance of quit will strictly result
 // in either ErrCanceled or ErrAbandoned.
@@ -688,6 +688,9 @@ func (c *Client) onPUBCOMP() error {
 // InitSession configures the Persistence for first use. Brokers use clientID to
 // uniquely identify the session. The session may be continued with AdoptSession
 // on another Client.
+//
+// An error implies either a broken setup or Persistence failure. Connection
+// issues, if any, are reported by ReadSlices.
 func InitSession(clientID string, p Persistence, c *Config) (*Client, error) {
 	return initSession(clientID, &ruggedPersistence{Persistence: p}, c)
 }
@@ -701,8 +704,8 @@ func InitSession(clientID string, p Persistence, c *Config) (*Client, error) {
 // be continued by using the same clientID again. Use CleanSession to prevent
 // reuse of an existing state.
 //
-// An error implies either a broken setup or persistence failure. Connection
-// issues, if any, are reported by ReadSlices.
+// An error implies a broken setup. Connection issues, if any, are reported by
+// ReadSlices.
 func VolatileSession(clientID string, c *Config) (*Client, error) {
 	return initSession(clientID, newVolatile(), c)
 }
