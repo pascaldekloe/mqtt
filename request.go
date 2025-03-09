@@ -23,8 +23,15 @@ var ErrCanceled = errors.New("mqtt: request canceled before submission")
 // The broker received the request, yet the result/response remains unknown.
 var ErrAbandoned = errors.New("mqtt: request abandoned after submission")
 
-// ErrBreak means that the connection broke up after the request was send.
-// The broker received the request, yet the result/response remains unknown.
+// ErrSubmit signals that the connection was lost during outbound transfer. The
+// status of the execution remains unknown, because there is no telling how much
+// of the payload actually reached the broker. Connection loss after submision
+// causes ErrBreak instead.
+var ErrSubmit = errors.New("mqtt: connection lost during submission")
+
+// ErrBreak signals that the connection was lost after a request was send, and
+// before a response was received. The status of the execution remains unknown,
+// similar to ErrSubmit.
 var ErrBreak = errors.New("mqtt: connection lost while awaiting response")
 
 // BufSize should fit topic names with a bit of overhead.
@@ -56,7 +63,10 @@ func (c *Client) Ping(quit <-chan struct{}) error {
 		case <-c.pingAck: // unlock
 		default: // picked up by unrelated pong
 		}
-		return fmt.Errorf("%w; PING request interrupted", err)
+		if errors.Is(err, ErrSubmit) {
+			return fmt.Errorf("%w; PING in limbo", err)
+		}
+		return fmt.Errorf("%w; PING not send", err)
 	}
 
 	select {
@@ -262,7 +272,10 @@ func (c *Client) subscribeLevel(quit <-chan struct{}, topicFilters []string, lev
 	// network submission
 	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return fmt.Errorf("%w; SUBSCRIBE request interrupted", err)
+		if errors.Is(err, ErrSubmit) {
+			return fmt.Errorf("%w; SUBSCRIBE in limbo", err)
+		}
+		return fmt.Errorf("%w; SUBSCRIBE not send", err)
 	}
 
 	select {
@@ -372,7 +385,10 @@ func (c *Client) Unsubscribe(quit <-chan struct{}, topicFilters ...string) error
 	// network submission
 	if err = c.write(quit, packet); err != nil {
 		c.unorderedTxs.endTx(packetID) // releases slot
-		return fmt.Errorf("%w; UNSUBSCRIBE request interrupted", err)
+		if errors.Is(err, ErrSubmit) {
+			return fmt.Errorf("%w; UNSUBSCRIBE in limbo", err)
+		}
+		return fmt.Errorf("%w; UNSUBSCRIBE not send", err)
 	}
 
 	select {
@@ -417,13 +433,7 @@ type orderedTxs struct {
 // Quit is optional, as nil just blocks. Appliance of quit will strictly result
 // in ErrCanceled.
 func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) error {
-	buf := bufPool.Get().(*[bufSize]byte)
-	defer bufPool.Put(buf)
-	packet, err := publishPacket(buf, message, topic, 0, typePUBLISH<<4)
-	if err != nil {
-		return err
-	}
-	return c.writeBuffers(quit, packet)
+	return c.publish(quit, message, topic, typePUBLISH<<4)
 }
 
 // PublishRetained is like Publish, but the broker must store the message, so
@@ -432,13 +442,25 @@ func (c *Client) Publish(quit <-chan struct{}, message []byte, topic string) err
 // Uppon reception, the broker must discard any message previously retained for
 // the topic name.
 func (c *Client) PublishRetained(quit <-chan struct{}, message []byte, topic string) error {
+	return c.publish(quit, message, topic, typePUBLISH<<4|retainFlag)
+}
+
+func (c *Client) publish(quit <-chan struct{}, message []byte, topic string, head byte) error {
 	buf := bufPool.Get().(*[bufSize]byte)
 	defer bufPool.Put(buf)
-	packet, err := publishPacket(buf, message, topic, 0, typePUBLISH<<4|retainFlag)
+	packet, err := publishPacket(buf, message, topic, 0, head)
 	if err != nil {
 		return err
 	}
-	return c.writeBuffers(quit, packet)
+
+	err = c.writeBuffers(quit, packet)
+	if err != nil {
+		if errors.Is(err, ErrSubmit) {
+			return fmt.Errorf("%w; PUBLISH in limbo", err)
+		}
+		return fmt.Errorf("%w; PUBLISH not send", err)
+	}
+	return nil
 }
 
 // PublishAtLeastOnce delivers the message with an “at least once” guarantee.

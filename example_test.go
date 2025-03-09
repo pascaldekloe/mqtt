@@ -147,8 +147,8 @@ func ExampleClient_PublishAtLeastOnce_critical() {
 	// alert acknowledged ✓
 }
 
-// Demonstrates all error scenario and the respective recovery options.
-func ExampleClient_Subscribe_sticky() {
+// The switch lists all possible outcomes of a SUBSCRIBE request.
+func ExampleClient_Subscribe_scenario() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -164,48 +164,47 @@ func ExampleClient_Subscribe_sticky() {
 			return
 
 		case mqtt.IsDeny(err): // illegal topic filter
-			fmt.Println(err)
-			return
+			panic(err) // unreachable for string literal
 
 		case errors.Is(err, mqtt.ErrClosed):
-			fmt.Println("no subscribe due client close")
+			fmt.Println("no subscribe with closed client")
 			return
 
 		case errors.Is(err, mqtt.ErrCanceled):
-			fmt.Println("no subscribe due timeout")
+			fmt.Println("no subscribe with quit before submision")
 			return
 
 		case errors.Is(err, mqtt.ErrAbandoned):
-			fmt.Println("subscribe state unknown due timeout")
+			fmt.Println("subscribe in limbo with quit after submission")
 			return
 
-		case errors.Is(err, mqtt.ErrBreak):
-			fmt.Println("subscribe state unknown due connection loss")
+		case errors.Is(err, mqtt.ErrDown):
+			fmt.Println("no subscribe without connection")
 			select {
 			case <-Online():
 				fmt.Println("subscribe retry with new connection")
 			case <-ctx.Done():
-				fmt.Println("subscribe timeout")
+				fmt.Println("subscribe expired before reconnect")
 				return
 			}
 
-		case errors.Is(err, mqtt.ErrDown):
-			fmt.Println("subscribe delay while service is down")
+		case errors.Is(err, mqtt.ErrSubmit), errors.Is(err, mqtt.ErrBreak):
+			fmt.Println("subscribe in limbo with transit failure")
 			select {
 			case <-Online():
 				fmt.Println("subscribe retry with new connection")
 			case <-ctx.Done():
-				fmt.Println("subscribe timeout")
+				fmt.Println("subscribe expired before reconnect")
 				return
 			}
 
 		case errors.Is(err, mqtt.ErrMax):
-			fmt.Println("subscribe hold-up due excessive number of pending requests")
-			time.Sleep(2 * time.Second) // backoff
+			fmt.Println("no subscribe with too many requests")
+			time.Sleep(time.Second) // backoff
 
-		default:
-			fmt.Println("subscribe request transfer interrupted:", err)
-			time.Sleep(time.Second / 2) // backoff
+		default: // unreachable
+			fmt.Println("unknown subscribe state:", err)
+			time.Sleep(time.Second) // backoff
 		}
 	}
 	// Output:

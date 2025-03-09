@@ -3,22 +3,21 @@
 //
 // http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
 //
-// Publish and Disconnect do a fire-and-forget submission. ErrClosed, ErrDown,
-// ErrCanceled or an IsDeny [Publish only] imply no request submission. Any
-// other error implies that the request submission was interrupted by either a
-// connection failure or a by PauseTimeout appliance.
+// Publish does a fire-and-forget submission. ErrClosed, ErrDown, ErrCanceled
+// and any IsDeny all imply no request submission. Any other error is guaranteed
+// to be an ErrSubmit, which leaves the request status in limbo. Disconnect is
+// similar, yet it won't IsDeny.
 //
-// Ping, Subscribe and Unsubscribe await response from the broker. ErrClosed,
-// ErrDown, ErrMax, ErrCanceled or an IsDeny [Subscribe and Unsubscribe only]
-// imply no request submission. ErrBreak and ErrAbandoned leave with the broker
-// response unknown. Subscribe responses may cause an SubscribeError. Any other
-// error implies that the request submission was interrupted by either a
-// connection failure or by a PauseTimeout appliance.
+// Subscribe and Unsubscribe await response from the broker. ErrClosed, ErrDown,
+// ErrMax, ErrCanceled and any IsDeny all imply no request submission. A broker
+// may fail subscription, which is represented by SubscribeError. Any other
+// error is guaranteed to be a an ErrSubmit, ErrBreak or ErrAbandoned, which
+// leaves the request status in limbo. Ping is similar, yet it won't IsDeny.
 //
 // PublishAtLeastOnce and PublishExactlyOnce enqueue requests to a Persistence.
-// Errors (either ErrClosed, ErrMax, IsDeny, or a Save return) imply that the
-// message was dropped. Once persisted, the client will execute the transfer
-// with endless retries, and report to the respective exchange channel.
+// Errors (either ErrClosed, ErrMax, any IsDeny, or any Save return) all imply
+// that the message was dropped. Once persisted, the Client will execute the
+// transfer with endless retries.
 package mqtt
 
 import (
@@ -130,19 +129,59 @@ func topicCheck(s string) error {
 	return stringCheck(s)
 }
 
-// IsDeny returns whether execution was rejected by the Client based on some
-// validation constraint, like a size limitation or an illegal UTF-8 encoding.
-// The rejection is permanent in such case. Another invocation with the same
-// arguments will result in the same error again.
-func IsDeny(err error) bool {
-	for err != nil {
-		switch err {
-		case errPacketMax, errStringMax, errUTF8, errNull, errZero, errSubscribeNone, errUnsubscribeNone:
-			return true
+// NonNilIsAny is a slightly more optimal errors.Is for multiple targets.
+// Matches are each assumed to be comprable.
+func nonNilIsAny(err error, matches []error) bool {
+	var more []error
+	for {
+		withIs, hasIs := err.(interface{ Is(error) bool })
+		for _, match := range matches {
+			if err == match || hasIs && withIs.Is(match) {
+				return true
+			}
 		}
-		err = errors.Unwrap(err)
+
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+			if err != nil {
+				continue
+			}
+
+		case interface{ Unwrap() []error }:
+			wrapped := u.Unwrap()
+			if more == nil {
+				// ensure append (up next) copies, just in case
+				more = wrapped[:len(wrapped):len(wrapped)]
+			} else {
+				more = append(more, wrapped...)
+			}
+		}
+
+		if len(more) == 0 {
+			return false
+		}
+		err = more[len(more)-1]
+		more = more[:len(more)-1]
 	}
-	return false
+}
+
+var denyErrs = []error{errPacketMax, errStringMax, errUTF8, errNull, errZero, errSubscribeNone, errUnsubscribeNone}
+
+// IsDeny returns whether execution got rejected by a Client based on validation
+// constraints, such as size limits or invalid UTF-8. The rejection is permanent
+// in such case. Retries are futile.
+func IsDeny(err error) bool {
+	return err != nil && nonNilIsAny(err, denyErrs)
+}
+
+var endErrs = []error{ErrClosed, ErrCanceled, ErrAbandoned}
+
+// IsEnd returns whether execution got rejected by a Client based on lifespan,
+// which is true for ErrClosed, ErrCanceled and ErrAbandoned. The rejection is
+// permanent in such case. Retries are futile.
+func IsEnd(err error) bool {
+	return err != nil && nonNilIsAny(err, endErrs)
 }
 
 // ConnectReturn is the response code from CONNACK.

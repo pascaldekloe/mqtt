@@ -18,6 +18,43 @@ func TestConstants(t *testing.T) {
 	}
 }
 
+func TestErrorClasses(t *testing.T) {
+	if IsDeny(nil) {
+		t.Error("IsDeny got true for nil")
+	}
+	if IsEnd(nil) {
+		t.Error("IsEnd true for nil")
+	}
+
+	for _, err := range denyErrs {
+		if !IsDeny(err) {
+			t.Error("IsDeny got false for error:", err)
+		}
+		if IsEnd(err) {
+			t.Error("IsEnd got true for error:", err)
+		}
+	}
+
+	for _, err := range endErrs {
+		if IsDeny(err) {
+			t.Error("IsDenry got true for error: ", err)
+		}
+		if !IsEnd(err) {
+			t.Error("IsEnd got false for error:", err)
+		}
+	}
+
+	var transitErrs = []error{ErrSubmit, ErrBreak}
+	for _, err := range transitErrs {
+		if IsDeny(err) {
+			t.Error("IsDenry got true for error: ", err)
+		}
+		if IsEnd(err) {
+			t.Error("IsEnd got true for error:", err)
+		}
+	}
+}
+
 func TestNewCONNREQ(t *testing.T) {
 	c := &Config{
 		Dialer: func(context.Context) (net.Conn, error) {

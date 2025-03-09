@@ -438,7 +438,7 @@ func (c *Client) Disconnect(quit <-chan struct{}) error {
 		// “After sending a DISCONNECT Packet the Client MUST NOT send
 		// any more Control Packets on that Network Connection.”
 		// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
-		writeErr := write(conn, packetDISCONNECT, c.PauseTimeout)
+		writeErr := writeTo(conn, packetDISCONNECT, c.PauseTimeout)
 		closeErr := conn.Close()
 		if writeErr != nil {
 			return fmt.Errorf("%w; DISCONNECT lost", writeErr)
@@ -605,6 +605,8 @@ func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 	}
 }
 
+var connClosedErrors = []error{net.ErrClosed, io.ErrClosedPipe}
+
 // Write submits the packet. Keep synchronised with writeBuffers!
 func (c *Client) write(quit <-chan struct{}, p []byte) error {
 	conn, err := c.lockWrite(quit)
@@ -612,21 +614,17 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 		return err
 	}
 
-	switch err := write(conn, p, c.PauseTimeout); {
-	case err == nil:
-		c.writeSem <- conn // unlock write
-		return nil
-
-	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
-		// read routine closed the connection
+	err = writeTo(conn, p, c.PauseTimeout)
+	if err != nil {
+		if !nonNilIsAny(err, connClosedErrors) {
+			conn.Close() // signal read routine
+		}
 		c.writeSem <- connPending // unlock write; pending connect
-		return fmt.Errorf("mqtt: submission interupted: %w", err)
-
-	default:
-		conn.Close()              // signal read routine
-		c.writeSem <- connPending // unlock write; pending connect
-		return err
+		return errors.Join(ErrSubmit, err)
 	}
+
+	c.writeSem <- conn // unlock write
+	return nil
 }
 
 // WriteBuffers submits the packet. Keep synchronised with write!
@@ -636,24 +634,22 @@ func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 		return err
 	}
 
-	switch err := writeBuffers(conn, p, c.PauseTimeout); {
-	case err == nil:
-		c.writeSem <- conn // unlock write
-		return nil
-
-	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
-		// read routine closed the connection
-		c.writeSem <- connPending // unlock write; pending connect
-		return fmt.Errorf("mqtt: submission interupted: %w", err)
-
-	default:
-		conn.Close()              // signal read routine
-		c.writeSem <- connPending // unlock write; pending connect
-		return err
+	err = writeBuffersTo(conn, p, c.PauseTimeout)
+	if err != nil {
+		if !nonNilIsAny(err, connClosedErrors) {
+			conn.Close() // signal read routine
+		}
+		// unlock write; pending connect
+		c.writeSem <- connPending
+		return errors.Join(ErrSubmit, err)
 	}
+
+	c.writeSem <- conn // unlock write
+	return nil
 }
 
-// WriteBuffersNoWait does not wait for pending connects.
+// WriteBuffersNoWait is like writeBuffers, yet it does not wait for pending
+// connects.
 func (c *Client) writeBuffersNoWait(p net.Buffers) error {
 	// lock write
 	conn, ok := <-c.writeSem
@@ -666,25 +662,22 @@ func (c *Client) writeBuffersNoWait(p net.Buffers) error {
 	}
 
 	// transfer
-	switch err := writeBuffers(conn, p, c.PauseTimeout); {
-	case err == nil:
-		c.writeSem <- conn // unlock write
-		return nil
-
-	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
-		// read routine closed the connection
-		c.writeSem <- connPending // unlock write; pending connect
-		return fmt.Errorf("mqtt: submission interupted: %w", err)
-
-	default:
-		conn.Close()              // signal read routine
-		c.writeSem <- connPending // unlock write; pending connect
-		return err
+	err := writeBuffersTo(conn, p, c.PauseTimeout)
+	if err != nil {
+		if !nonNilIsAny(err, connClosedErrors) {
+			conn.Close() // signal read routine
+		}
+		// unlock write; pending connect
+		c.writeSem <- connPending
+		return errors.Join(ErrSubmit, err)
 	}
+
+	c.writeSem <- conn // unlock write
+	return nil
 }
 
-// Write submits the packet. Keep synchronised with writeBuffers!
-func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
+// WriteTo submits the packet. Keep synchronised with writeBuffers!
+func writeTo(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 	if idleTimeout != 0 {
 		// Abandon timer to prevent waking up the system for no good reason.
 		// https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/MinimizeTimerUse.html
@@ -699,7 +692,6 @@ func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 			}
 		}
 		n, err := conn.Write(p)
-		// ⚠️ reverse error check
 		if err == nil {
 			return nil
 		}
@@ -710,12 +702,12 @@ func write(conn net.Conn, p []byte, idleTimeout time.Duration) error {
 			return err
 		}
 
-		p = p[n:] // continue with remaining
+		p = p[n:]
 	}
 }
 
-// WriteBuffers submits the packet. Keep synchronised with write!
-func writeBuffers(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error {
+// WriteBuffersTo submits the packet. Keep synchronised with write!
+func writeBuffersTo(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error {
 	if idleTimeout != 0 {
 		// Abandon timer to prevent waking up the system for no good reason.
 		// https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/MinimizeTimerUse.html
@@ -730,7 +722,6 @@ func writeBuffers(conn net.Conn, p net.Buffers, idleTimeout time.Duration) error
 			}
 		}
 		n, err := p.WriteTo(conn)
-		// ⚠️ reverse error check
 		if err == nil {
 			return nil
 		}
@@ -1007,7 +998,7 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 			packet[0] |= dupeFlag
 		}
 
-		err = write(conn, packet, c.PauseTimeout)
+		err = writeTo(conn, packet, c.PauseTimeout)
 		if err != nil {
 			return err
 		}
@@ -1021,7 +1012,7 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 
 func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*bufio.Reader, error) {
 	// send request
-	err := write(conn, config.newCONNREQ(clientID), c.PauseTimeout)
+	err := writeTo(conn, config.newCONNREQ(clientID), c.PauseTimeout)
 	if err != nil {
 		return nil, err
 	}
