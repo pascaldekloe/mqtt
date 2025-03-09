@@ -7,6 +7,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"time"
 )
 
 // ErrMax denies a request on transit capacity, which prevents the Client from
@@ -41,6 +42,58 @@ const bufSize = 128
 // Append will allocate the appropriate amount on overflows.
 // The PUBLISH messages are not copied into these buffers.
 var bufPool = sync.Pool{New: func() interface{} { return new([bufSize]byte) }}
+
+var denyAndEndErrs = append(append(
+	make([]error, 0, len(denyErrs)+len(endErrs)),
+	denyErrs...,
+),
+	endErrs...,
+)
+
+// Backoff returns a channel which is closed once the Client can (and possibly
+// should) retry the error. The return is nil when retries are not applicable,
+// i.e., any IsDeny, IsEnd, or SubscribeError gets a nil channel which blocks.
+func (c *Client) Backoff(err error) <-chan struct{} {
+	switch {
+	case err == nil || nonNilIsAny(err, denyAndEndErrs):
+		return nil
+
+	case errors.Is(err, ErrMax):
+		const timeout = time.Second / 4
+
+		// shared backoff for too many requests
+		for {
+			shared := c.backoffOnMax.Load()
+			if shared != nil {
+				// maybe shared already expired
+				select {
+				case <-*shared:
+					break // replace with new up next
+				default:
+					return *shared
+				}
+			}
+			// shared nil or expired
+
+			new := make(chan struct{})
+			var readEnd <-chan struct{} = new
+			if c.backoffOnMax.CompareAndSwap(shared, &readEnd) {
+				// launch Timer only within singleton guarantee
+				time.AfterFunc(timeout, func() { close(new) })
+				return readEnd
+			}
+			// another goroutine placed a new backoff first
+		}
+
+	case errors.As(err, new(SubscribeError)):
+		// server failed request
+		return nil
+
+	default:
+		// connection was down, or it just broke
+		return c.Online() // await reconnect
+	}
+}
 
 // Ping makes a roundtrip to validate the connection. Client allows only one
 // ping at a time. Redundant requests get ErrMax.

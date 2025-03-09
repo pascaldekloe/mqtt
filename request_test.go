@@ -16,6 +16,53 @@ import (
 	"github.com/pascaldekloe/mqtt/mqtttest"
 )
 
+func TestBackoff_ErrMax(t *testing.T) {
+	client, _, testTimeout := newClientPipe(t)
+
+	const parallelism = 5
+	backoffs := make(chan (<-chan struct{}), parallelism)
+
+	launch := make(chan struct{})
+	for i := 0; i < parallelism; i++ {
+		go func() {
+			<-launch // race start
+			backoffs <- client.Backoff(mqtt.ErrMax)
+		}()
+	}
+	close(launch)
+
+	first := <-backoffs
+	if first == nil {
+		t.Fatal("got no backoff for retriable error")
+	}
+	select {
+	case <-first:
+		t.Fatal("backoff expired on arrival")
+	default:
+		break // OK
+	}
+
+	// match first against all others
+	for i := 1; i < parallelism; i++ {
+		switch <-backoffs {
+		case nil:
+			t.Fatal("got no backoff for retriable error")
+		case first:
+			break // OK
+		default:
+			t.Errorf("got another wait channel; want all the same")
+		}
+	}
+
+	t.Log("await backoff channel")
+	select {
+	case <-first:
+		break // good
+	case <-testTimeout:
+		t.Error("test timeout before backoff expiry")
+	}
+}
+
 func TestPing(t *testing.T) {
 	client, conn, testTimeout := newClientPipe(t)
 	brokerMockDone := testRoutine(t, func() {
@@ -47,6 +94,15 @@ func TestPingReqTimeout(t *testing.T) {
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	} else {
+		switch client.Backoff(err) {
+		case nil:
+			t.Error("no backoff for timeout")
+		case client.Online():
+			break // OK
+		default:
+			t.Error("backoff for timeout not online await")
+		}
 	}
 	<-brokerMockDone
 }
@@ -89,6 +145,15 @@ func TestSubscribeReqTimeout(t *testing.T) {
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	} else {
+		switch client.Backoff(err) {
+		case nil:
+			t.Error("no backoff for timeout")
+		case client.Online():
+			break // OK
+		default:
+			t.Error("backoff for timeout not online await")
+		}
 	}
 	<-brokerMockDone
 }
@@ -166,6 +231,15 @@ func TestPublishReqTimeout(t *testing.T) {
 	var e net.Error
 	if !errors.As(err, &e) || !e.Timeout() {
 		t.Errorf("got error %q [%T], want a Timeout net.Error", err, err)
+	} else {
+		switch client.Backoff(err) {
+		case nil:
+			t.Error("no backoff for timeout")
+		case client.Online():
+			break // OK
+		default:
+			t.Error("backoff for timeout not online await")
+		}
 	}
 }
 
@@ -817,6 +891,15 @@ func TestBreak(t *testing.T) {
 		err := client.Ping(testTimeout)
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("ping got error %q [%T], want an mqtt.ErrBreak", err, err)
+		} else {
+			switch client.Backoff(err) {
+			case nil:
+				t.Error("no backoff for ErrBreak")
+			case client.Online():
+				break // OK
+			default:
+				t.Error("backoff for ErrBreak not online await")
+			}
 		}
 	})
 	wantPacketHex(t, conn, "c000") // PINGREQ
@@ -825,6 +908,15 @@ func TestBreak(t *testing.T) {
 		err := client.Subscribe(testTimeout, "x")
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("subscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
+		} else {
+			switch client.Backoff(err) {
+			case nil:
+				t.Error("no backoff for ErrBreak")
+			case client.Online():
+				break // OK
+			default:
+				t.Error("backoff for ErrBreak not online await")
+			}
 		}
 	})
 	wantPacketHex(t, conn, "8206600000017802") // SUBSCRIBE
@@ -833,6 +925,15 @@ func TestBreak(t *testing.T) {
 		err := client.Unsubscribe(testTimeout, "x")
 		if !errors.Is(err, mqtt.ErrBreak) {
 			t.Errorf("unsubscribe got error %q [%T], want an mqtt.ErrBreak", err, err)
+		} else {
+			switch client.Backoff(err) {
+			case nil:
+				t.Error("no backoff for ErrBreak")
+			case client.Online():
+				break // OK
+			default:
+				t.Error("backoff for ErrBreak not online await")
+			}
 		}
 	})
 	wantPacketHex(t, conn, "a2054001000178") // UNSUBSCRIBE
@@ -849,72 +950,58 @@ func TestDeny(t *testing.T) {
 	// no invocation to the client allowed
 	client, _, testTimeout := newClientPipe(t)
 
-	// UTF-8 validation
-	err := client.PublishRetained(testTimeout, nil, "topic with \xED\xA0\x80 not allowed")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("publish with U+D800 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	_, err = client.PublishAtLeastOnceRetained(nil, "topic with \xED\xA0\x81 not allowed")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("publish with U+D801 in topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	_, err = client.PublishExactlyOnceRetained(nil, "topic with \xED\xBF\xBF not allowed")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("publish with U+DFFF in topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.SubscribeLimitAtMostOnce(nil, "null char \x00 not allowed")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with null character got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.SubscribeLimitAtLeastOnce(nil, "char \x80 breaks UTF-8")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with broken UTF-8 got error %q [%T], want an mqtt.IsDeny", err, err)
+	errCheck := func(err error, desc string) {
+		if !mqtt.IsDeny(err) {
+			t.Errorf("%s got error %q [%T], want an mqtt.IsDeny",
+				desc, err, err)
+		} else if client.Backoff(err) != nil {
+			t.Errorf("%s got backoff for deny error", desc)
+		}
 	}
 
-	err = client.Subscribe(testTimeout)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Unsubscribe(testTimeout)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("unsubscribe with nothing got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Subscribe(testTimeout, "")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Unsubscribe(testTimeout, "")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("unsubscribe with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Publish(testTimeout, nil, "")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("publish with zero topic got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
+	// UTF-8 validation
+	errCheck(client.PublishRetained(testTimeout, nil, "topic with \xED\xA0\x80 not allowed"),
+		"publish QoS 0 with U+D800 in topic")
+	_, err := client.PublishAtLeastOnceRetained(nil, "topic with \xED\xA0\x81 not allowed")
+	errCheck(err, "publish QoS 1 with U+D801 in topic")
+	_, err = client.PublishExactlyOnceRetained(nil, "topic with \xED\xBF\xBF not allowed")
+	errCheck(err, "publish QoS 2 with U+DFFF in topic")
+
+	errCheck(client.SubscribeLimitAtMostOnce(nil, "null char \x00 not allowed"),
+		"subscribe max QoS 0 with null character")
+	errCheck(client.SubscribeLimitAtLeastOnce(nil, "char \x80 breaks UTF-8"),
+		"subscribe max QoS 1 with broken UTF-8")
+
+	// empty vararg
+	errCheck(client.Subscribe(testTimeout),
+		"subscribe with nothing")
+	errCheck(client.Unsubscribe(testTimeout),
+		"unsubscribe with nothing")
+
+	// empty topic
+	errCheck(client.Subscribe(testTimeout, ""),
+		"subscribe with zero topic")
+	errCheck(client.Unsubscribe(testTimeout, ""),
+		"unsubscribe with zero topic")
+	errCheck(client.Publish(testTimeout, nil, ""),
+		"publish with zero topic")
 
 	// size limits
 	tooBig := strings.Repeat("A", 1<<16)
-	err = client.Unsubscribe(testTimeout, tooBig)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("unsubscribe with 64 KiB filter got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Publish(testTimeout, make([]byte, 256*1024*1024), "")
-	if !mqtt.IsDeny(err) {
-		t.Errorf("publish with 256 MiB got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
+	errCheck(client.Unsubscribe(testTimeout, tooBig),
+		"unsubscribe with 64 KiB filter")
+	errCheck(client.Publish(testTimeout, make([]byte, 256*1024*1024), ""),
+		"publish with 256 MiB")
+
 	filtersTooBig := make([]string, 256*1024)
 	KiB := strings.Repeat("A", 1024)
 	for i := range filtersTooBig {
 		filtersTooBig[i] = KiB
 	}
-	err = client.Subscribe(testTimeout, filtersTooBig...)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("subscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
-	err = client.Unsubscribe(testTimeout, filtersTooBig...)
-	if !mqtt.IsDeny(err) {
-		t.Errorf("unsubscribe with 256 MiB topic filters got error %q [%T], want an mqtt.IsDeny", err, err)
-	}
+	errCheck(client.Subscribe(testTimeout, filtersTooBig...),
+		"subscribe with 256 MiB topic filters")
+	errCheck(client.Unsubscribe(testTimeout, filtersTooBig...),
+		"unsubscribe with 256 MiB topic filters")
 }
 
 func verifyExchange(t *testing.T, testTimeout <-chan struct{}, exchange <-chan error) {

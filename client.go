@@ -280,6 +280,9 @@ type Client struct {
 
 	// The read routine parks reception beyond readBufSize.
 	bigMessage *BigMessage
+
+	// shared backoff on ErrMax prevents timer flood
+	backoffOnMax atomic.Pointer[<-chan struct{}]
 }
 
 // Outbound submission may face multiple goroutines.
