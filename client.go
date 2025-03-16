@@ -80,7 +80,20 @@ func NewTLSDialer(network, address string, config *tls.Config) Dialer {
 type Config struct {
 	Dialer // chooses the broker
 
-	// PauseTimeout sets the minimim transfer rate as one byte per duration.
+	// Channels returned by ReadBackoff will block for at least this amount
+	// of time on connection loss. Zero defaults to one second. Retries at a
+	// low interval may induce ill side-effects such as network strain, log
+	// flooding and battery consumption.
+	ReconnectWaitMin time.Duration
+
+	// Channels returned by ReadBackoff will each double the amount of time
+	// they block on consecutive failure to connect, up to this maximum. The
+	// value defaults to one minute. The maximum is raised to the effective
+	// minimum (from ReconnectWaitMin) when short. Connection refusal by the
+	// broker directly applies to the maximum, without ramp up.
+	ReconnectWaitMax time.Duration
+
+	// PauseTimeout sets the minimum transfer rate as one byte per duration.
 	// Zero disables timeout protection entirely, which leaves the Client
 	// vulnerable to blocking on stale connections.
 	//
@@ -224,13 +237,13 @@ func (c *Config) newCONNREQ(clientID []byte) []byte {
 // start in the Offline state. The (un)subscribe, publish and ping methods block
 // until the first connect attempt (from ReadSlices) completes. When the connect
 // attempt fails, then requests receive ErrDown until a retry succeeds. The same
-// goes for reconnects on connection loss.
+// applies to reconnects.
 //
-// A single goroutine must invoke ReadSlices consecutively until ErrClosed. Some
-// backoff on error reception comes recommended though.
+// A single goroutine must invoke ReadSlices consecutively until ErrClosed.
+// Appliance of ReadBackoff comes recommended though.
 //
 // Multiple goroutines may invoke methods on a Client simultaneously, except for
-// ReadSlices.
+// ReadSlices and ReadBackoff.
 type Client struct {
 	// The applied settings are read only.
 	Config
@@ -283,6 +296,9 @@ type Client struct {
 
 	// shared backoff on ErrMax prevents timer flood
 	backoffOnMax atomic.Pointer[<-chan struct{}]
+
+	// backoff ramp-up
+	reconnectWait time.Duration
 }
 
 // Outbound submission may face multiple goroutines.
@@ -313,6 +329,16 @@ type seq struct {
 }
 
 func newClient(p Persistence, config *Config) *Client {
+	if config.ReconnectWaitMin == 0 {
+		config.ReconnectWaitMin = time.Second
+	}
+	if config.ReconnectWaitMin < 0 {
+		config.ReconnectWaitMin = 0
+	}
+	if config.ReconnectWaitMax < config.ReconnectWaitMin {
+		config.ReconnectWaitMax = config.ReconnectWaitMin
+	}
+
 	if config.AtLeastOnceMax < 0 || config.AtLeastOnceMax > publishIDMask {
 		config.AtLeastOnceMax = publishIDMask + 1
 	}
@@ -923,6 +949,8 @@ func (c *Client) connect() error {
 	c.writeSem <- conn
 	c.readConn = conn
 	c.bufr = bufr
+	// reset backoff ramp-up
+	c.reconnectWait = 0
 	return nil
 }
 
@@ -1081,6 +1109,47 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 	return r, nil
 }
 
+var closed = make(chan struct{})
+
+func init() {
+	close(closed)
+}
+
+// ReadBackoff returns a channel which is closed once ReadSlices should be
+// invoked again. The return is nil when ReadSlices was fatal, i.e., ErrClosed
+// gets a nil channel which blocks. Idle time on connection loss is subject to
+// ReconnectWaitMin and ReconnectWaitMax from Config.
+func (c *Client) ReadBackoff(err error) <-chan struct{} {
+	var idle time.Duration
+	switch {
+	case err == nil, c.bigMessage != nil:
+		return closed // no backoff
+
+	case errors.Is(err, ErrClosed):
+		return nil // blocks
+
+	case c.readConn != nil:
+		// error came from Persistence ☠️
+		idle = time.Second
+
+	case IsConnectionRefused(err):
+		// documented behaviour
+		idle = c.ReconnectWaitMax
+
+	default:
+		// need reconnect
+		idle = c.reconnectWait
+		idle = max(idle, c.ReconnectWaitMin)
+		idle = min(idle, c.ReconnectWaitMax)
+		// exponential ramp-up is documented behaviour
+		c.reconnectWait = idle * 2
+	}
+
+	wait := make(chan struct{})
+	time.AfterFunc(idle, func() { close(wait) })
+	return wait
+}
+
 // ReadSlices should be invoked consecutively from a single goroutine until
 // ErrClosed. Each invocation acknowledges ownership of the previous return.
 //
@@ -1096,8 +1165,8 @@ func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*buf
 //   - Persist message and/or topic. Then, continue from there.
 //   - Apply low timeouts in a strict manner.
 //
-// Invocation should apply some backoff after errors other than BigMessage,
-// especially when IsConnectionRefused. See the Client example for a setup.
+// Invocation should apply some backoff after errors other than BigMessage.
+// Use of ReadBackoff comes recommended. See the Client example for a setup.
 func (c *Client) ReadSlices() (message, topic []byte, err error) {
 	message, topic, err = c.readSlices()
 	switch {

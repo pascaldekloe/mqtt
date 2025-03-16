@@ -80,21 +80,16 @@ func ExampleClient_setup() {
 				log.Printf("📥 %q: %q", topic, message)
 
 			case errors.As(err, &big):
-				log.Printf("📥 %q: %d byte message omitted", big.Topic, big.Size)
-
-			case errors.Is(err, mqtt.ErrClosed):
-				log.Print(err)
-				return // terminated
-
-			case mqtt.IsConnectionRefused(err):
-				log.Print(err) // explains rejection
-				// mqtt.ErrDown for a while
-				time.Sleep(15 * time.Minute)
+				log.Printf("📥 %q: %d byte message omitted",
+					big.Topic, big.Size)
 
 			default:
-				log.Print("broker unavailable: ", err)
-				// mqtt.ErrDown during backoff
-				time.Sleep(2 * time.Second)
+				log.Print(err)
+				wait := client.ReadBackoff(err)
+				if wait == nil {
+					return // terminated
+				}
+				<-wait
 			}
 		}
 	}()

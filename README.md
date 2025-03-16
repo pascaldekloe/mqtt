@@ -39,20 +39,16 @@ A *read routine* sees inbound messages from any of the subscribed topics.
 ```go
 for {
 	message, topic, err := client.ReadSlices()
-	switch {
-	case err == nil:
-		r, _ := utf8.DecodeLastRune(message)
-		switch r {
-		case '℃', '℉':
-			log.Printf("%q at %q", message, topic)
-		}
+	if err != nil {
+		log.Print(err)
+		<-client.ReadBackoff(err)
+		continue
+	}
 
-	case errors.Is(err, mqtt.ErrClosed):
-		return // client terminated
-
-	default:
-		log.Print("broker unavailable: ", err)
-		time.Sleep(time.Second) // backoff
+	r, _ := utf8.DecodeLastRune(message)
+	switch r {
+	case '℃', '℉':
+		log.Printf("%q at %q", message, topic)
 	}
 }
 ```

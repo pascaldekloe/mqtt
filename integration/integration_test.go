@@ -162,14 +162,17 @@ func testRoundtripClient(t *testing.T, client *mqtt.Client) {
 		for {
 			message, topic, err := client.ReadSlices()
 			if err != nil {
-				if errors.Is(err, mqtt.ErrClosed) {
-					return
+				wait := client.ReadBackoff(err)
+				if wait == nil {
+					return // terminated
 				}
+
 				select {
 				case readDone <- err:
 				default: // discard
 				}
-				time.Sleep(time.Second / 2)
+
+				<-wait
 				continue
 			}
 
