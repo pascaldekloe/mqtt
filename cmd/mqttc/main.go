@@ -307,7 +307,7 @@ func publish(client *mqtt.Client, topic string) (ok bool) {
 func subscribe(client *mqtt.Client, filters []string) (ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
 	defer cancel()
-	err := client.SubscribeLimitAtMostOnce(ctx.Done(), filters...)
+	err := client.Subscribe(ctx.Done(), filters...)
 	if err != nil {
 		onReqErr(err, client)
 		return false
