@@ -20,8 +20,6 @@ import (
 	"github.com/pascaldekloe/mqtt"
 )
 
-const messageMax = 256 * 1024 * 1024
-
 // ANSI escape codes for markup.
 const (
 	bold   = "\x1b[1m"
@@ -193,17 +191,10 @@ func Config() (clientID string, config *mqtt.Config) {
 
 var exitStatus = make(chan int, 1)
 
-func failMQTT(client *mqtt.Client, err error) {
-	log.Print(err)
-
+func setExitStatusOnce(code int) {
 	select {
-	case exitStatus <- 1:
-	default: // exit status already defined
-	}
-
-	err = client.Close()
-	if err != nil {
-		log.Print(err)
+	case exitStatus <- code:
+	default:
 	}
 }
 
@@ -223,9 +214,27 @@ func main() {
 
 	go applySignals(client)
 
-	go execPubSub(client)
+	// broker exchange
+	go func() {
+		// maybe PUBLISH
+		if *publishFlag != "" && !publish(client, *publishFlag) {
+			return
+		}
+		// maybe SUBSCRIBE
+		if len(subscribeFlags) != 0 && !subscribe(client, subscribeFlags) {
+			return
+		}
+		// PING when no PUBLISH and no SUBSCRIBE
+		if *publishFlag == "" && len(subscribeFlags) == 0 && !ping(client) {
+			return
+		}
+		// DISCONNECT when no SUBSCRIBE
+		if len(subscribeFlags) == 0 && disconnect(client) {
+			setExitStatusOnce(0)
+		}
+	}()
 
-	// Read routine runs until mqtt.Client Close or Disconnect.
+	// read routine
 	var big *mqtt.BigMessage
 	for {
 		message, topic, err := client.ReadSlices()
@@ -233,32 +242,31 @@ func main() {
 		case err == nil:
 			printMessage(message, topic)
 
+		case errors.As(err, &big):
+			message, err = big.ReadAll()
+			if err != nil {
+				log.Print(err)
+				os.Exit(1)
+			}
+			printMessage(message, big.Topic)
+
 		case errors.Is(err, mqtt.ErrClosed):
 			os.Exit(<-exitStatus)
 
-		case errors.As(err, &big):
-			message, err := big.ReadAll()
-			if err != nil {
-				failMQTT(client, err)
-			} else {
-				printMessage(message, big.Topic)
-			}
+		case errors.Is(err, mqtt.ErrProtocolLevel):
+			os.Exit(5)
+		case errors.Is(err, mqtt.ErrClientID):
+			os.Exit(6)
+		case errors.Is(err, mqtt.ErrUnavailable):
+			os.Exit(7)
+		case errors.Is(err, mqtt.ErrAuthBad):
+			os.Exit(8)
+		case errors.Is(err, mqtt.ErrAuth):
+			os.Exit(9)
 
 		default:
-			failMQTT(client, err)
-
-			switch {
-			case errors.Is(err, mqtt.ErrProtocolLevel):
-				os.Exit(5)
-			case errors.Is(err, mqtt.ErrClientID):
-				os.Exit(6)
-			case errors.Is(err, mqtt.ErrUnavailable):
-				os.Exit(7)
-			case errors.Is(err, mqtt.ErrAuthBad):
-				os.Exit(8)
-			case errors.Is(err, mqtt.ErrAuth):
-				os.Exit(9)
-			}
+			log.Print(err)
+			os.Exit(1)
 		}
 	}
 }
@@ -276,81 +284,78 @@ func printMessage(message, topic interface{}) {
 	}
 }
 
-func execPubSub(client *mqtt.Client) {
-	if *publishFlag != "" {
-		// publish standard input
-		message, err := io.ReadAll(io.LimitReader(os.Stdin, messageMax))
-		switch {
-		case err != nil:
-			log.Fatal(name, ": ", err)
-		case len(message) >= messageMax:
-			log.Fatalf("%s: standard input reached %d byte limit", name, messageMax)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
-		defer cancel()
-		err = client.Publish(ctx.Done(), message, *publishFlag)
-		switch {
-		case err == nil:
-			if *verboseFlag {
-				log.Printf("%s: published %d bytes to %q", name, len(message), *publishFlag)
-			}
-		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-			return
-		default:
-			failMQTT(client, err)
-			return
-		}
+func publish(client *mqtt.Client, topic string) (ok bool) {
+	// messages of 256 MiB get an mqtt.IsDeny
+	const bufMax = 256 * 1024 * 1024
+	message, err := io.ReadAll(io.LimitReader(os.Stdin, bufMax))
+	if err != nil {
+		log.Fatal(name, ": ", err)
 	}
-
-	if len(subscribeFlags) != 0 {
-		// subscribe & return
-		ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
-		defer cancel()
-		err := client.SubscribeLimitAtMostOnce(ctx.Done(), subscribeFlags...)
-		switch {
-		case err == nil:
-			if *verboseFlag {
-				log.Printf("%s: subscribed to %d topic filters", name, len(subscribeFlags))
-			}
-		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-			break
-		default:
-			failMQTT(client, err)
-		}
-
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
+	defer cancel()
+	err = client.Publish(ctx.Done(), message, topic)
+	if err != nil {
+		onReqErr(err, client)
+		return false
 	}
-
-	if *publishFlag == "" {
-		// ping exchange
-		ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
-		defer cancel()
-		err := client.Ping(ctx.Done())
-		switch {
-		case err == nil:
-			break // OK
-		case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-			return
-		default:
-			failMQTT(client, err)
-			return
-		}
+	if *verboseFlag {
+		log.Printf("%s: published %d bytes to %q", name, len(message), *publishFlag)
 	}
+	return true
+}
 
-	// graceful shutdown
+func subscribe(client *mqtt.Client, filters []string) (ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
+	defer cancel()
+	err := client.SubscribeLimitAtMostOnce(ctx.Done(), filters...)
+	if err != nil {
+		onReqErr(err, client)
+		return false
+	}
+	if *verboseFlag {
+		log.Printf("%s: subscribed to %d topic filters", name, len(subscribeFlags))
+	}
+	return true
+}
+
+func ping(client *mqtt.Client) (ok bool) {
+	// ping exchange
+	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
+	defer cancel()
+	err := client.Ping(ctx.Done())
+	if err != nil {
+		onReqErr(err, client)
+		return false
+	}
+	if *verboseFlag {
+		log.Printf("%s: ping OK", name)
+	}
+	return true
+}
+
+func disconnect(client *mqtt.Client) (ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
 	defer cancel()
 	err := client.Disconnect(ctx.Done())
-	switch {
-	case err == nil:
-		exitStatus <- 0
-	case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-		// exit status defined by cause
-		break
-	default:
+	if err != nil {
+		onReqErr(err, client)
+		return false
+	}
+	if *verboseFlag {
+		log.Printf("%s: disconnected", name)
+	}
+	return true
+}
+
+func onReqErr(err error, client *mqtt.Client) {
+	if errors.Is(err, mqtt.ErrClosed) {
+		return // already done for
+	}
+	log.Print(err)
+	setExitStatusOnce(1)
+	err = client.Close()
+	if err != nil {
 		log.Print(err)
-		exitStatus <- 1
 	}
 }
 
@@ -361,10 +366,7 @@ func applySignals(client *mqtt.Client) {
 		switch sig {
 		case syscall.SIGINT:
 			log.Print(name, ": SIGINT received")
-			select {
-			case exitStatus <- 130:
-			default: // exit status already defined
-			}
+			setExitStatusOnce(130)
 			err := client.Close()
 			if err != nil {
 				log.Print(err)
@@ -372,18 +374,8 @@ func applySignals(client *mqtt.Client) {
 
 		case syscall.SIGTERM:
 			log.Print(name, ": SIGTERM received")
-			ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
-			defer cancel()
-			err := client.Disconnect(ctx.Done())
-			switch {
-			case err == nil:
-				exitStatus <- 143
-			case errors.Is(err, mqtt.ErrClosed), errors.Is(err, mqtt.ErrDown):
-				// exit status defined by cause
-				break
-			default:
-				log.Print(err)
-				exitStatus <- 1
+			if disconnect(client) {
+				setExitStatusOnce(143)
 			}
 		}
 	}
