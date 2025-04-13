@@ -564,6 +564,10 @@ func blockSignalChan(ch chan chan struct{}) {
 }
 
 func (c *Client) toOffline() {
+	// halt Online signal per direct
+	blockSignalChan(c.onlineSig)
+
+	// lock write & close connection
 	select {
 	case _, ok := <-c.writeSem:
 		if !ok {
@@ -571,65 +575,88 @@ func (c *Client) toOffline() {
 		}
 		c.readConn.Close()
 	default:
-		c.readConn.Close() // interrupt write
+		// interrupt write
+		c.readConn.Close()
+		// await write lock
 		_, ok := <-c.writeSem
 		if !ok {
 			return // ErrClosed
 		}
 	}
-	blockSignalChan(c.onlineSig)
+
+	// release Offline signal before write unlock
 	clearSignalChan(c.offlineSig)
+	// unlock write in connection-pending state
 	c.writeSem <- connPending
 
+	// reset connection
 	c.readConn = nil
-	c.bigMessage = nil // lost
 	c.bufr = nil
-	c.peek = nil // applied to prevous r, if any
+	c.peek = nil
+	c.bigMessage = nil
 
+	// signal PING (doesn't have to be strict)
 	select {
 	case ack := <-c.pingAck:
 		ack <- ErrBreak
 	default:
-		break
+		break // none in progress
 	}
 
 	c.unorderedTxs.breakAll()
 }
 
-// LockWrite acquires the write semaphore.
+// LockWrite acquires the write semaphore. It awaits the first connect attempt
+// when offline. Multiple goroutines may invoke lockWrite simultaneously.
 func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 	var checkConnect *time.Ticker
 
 	for {
+		// aquire write lock
+		var (
+			conn net.Conn
+			ok   bool
+		)
 		select {
+		case conn, ok = <-c.writeSem:
+			break // locked
+		default:
+			select {
+			case conn, ok = <-c.writeSem:
+				break // locked after all
+			case <-quit:
+				return nil, ErrCanceled
+			}
+		}
+		if !ok {
+			return nil, ErrClosed
+		}
+
+		switch conn {
+		default:
+			return conn, nil
+		case connDown:
+			c.writeSem <- connDown // unlock
+			return nil, ErrDown
+		case connPending:
+			c.writeSem <- connPending // unlock
+		}
+		// await first connect attempt
+
+		if checkConnect == nil {
+			// start once, lazily
+			checkConnect = time.NewTicker(20 * time.Millisecond)
+			defer checkConnect.Stop()
+		}
+		select {
+		case <-c.ctx.Done():
+			return nil, ErrClosed
+		case <-c.Online():
+			break // connect succeeded
+		case <-checkConnect.C:
+			break // connect may have failed
 		case <-quit:
 			return nil, ErrCanceled
-		case conn, ok := <-c.writeSem: // lock
-			switch {
-			case !ok:
-				return nil, ErrClosed
-			case conn == connDown:
-				c.writeSem <- connDown // unlock
-				return nil, ErrDown
-			case conn == connPending:
-				c.writeSem <- connPending // unlock
-				break
-			default:
-				return conn, nil
-			}
-
-			if checkConnect == nil {
-				checkConnect = time.NewTicker(20 * time.Millisecond)
-				defer checkConnect.Stop()
-			}
-			select {
-			case <-c.ctx.Done():
-				return nil, ErrClosed
-			case <-c.Online():
-				break // connect succeeded
-			case <-checkConnect.C:
-				break // connect may have failed
-			}
 		}
 	}
 }
@@ -637,6 +664,7 @@ func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 var connClosedErrors = []error{net.ErrClosed, io.ErrClosedPipe}
 
 // Write submits the packet. Keep synchronised with writeBuffers!
+// Multiple goroutines may invoke write simultaneously.
 func (c *Client) write(quit <-chan struct{}, p []byte) error {
 	conn, err := c.lockWrite(quit)
 	if err != nil {
@@ -645,10 +673,15 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 
 	err = writeTo(conn, p, c.PauseTimeout)
 	if err != nil {
+		// halt Online signal per direct
+		blockSignalChan(c.onlineSig)
 		if !nonNilIsAny(err, connClosedErrors) {
 			conn.Close() // signal read routine
 		}
-		c.writeSem <- connPending // unlock write; pending connect
+		// release Offline signal before write unlock
+		clearSignalChan(c.offlineSig)
+		// unlock write in connection-pending state
+		c.writeSem <- connPending
 		return errors.Join(ErrSubmit, err)
 	}
 
@@ -657,6 +690,7 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 }
 
 // WriteBuffers submits the packet. Keep synchronised with write!
+// Multiple goroutines may invoke writeBuffers simultaneously.
 func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 	conn, err := c.lockWrite(quit)
 	if err != nil {
@@ -665,44 +699,20 @@ func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 
 	err = writeBuffersTo(conn, p, c.PauseTimeout)
 	if err != nil {
+		// halt Online signal per direct
+		blockSignalChan(c.onlineSig)
 		if !nonNilIsAny(err, connClosedErrors) {
 			conn.Close() // signal read routine
 		}
-		// unlock write; pending connect
+		// release Offline signal before write unlock
+		clearSignalChan(c.offlineSig)
+		// unlock write in connection-pending state
 		c.writeSem <- connPending
 		return errors.Join(ErrSubmit, err)
 	}
 
 	c.writeSem <- conn // unlock write
-	return nil
-}
-
-// WriteBuffersNoWait is like writeBuffers, yet it does not wait for pending
-// connects.
-func (c *Client) writeBuffersNoWait(p net.Buffers) error {
-	// lock write
-	conn, ok := <-c.writeSem
-	switch {
-	case !ok:
-		return ErrClosed
-	case conn == connDown, conn == connPending:
-		c.writeSem <- conn // unlock
-		return ErrDown
-	}
-
-	// transfer
-	err := writeBuffersTo(conn, p, c.PauseTimeout)
-	if err != nil {
-		if !nonNilIsAny(err, connClosedErrors) {
-			conn.Close() // signal read routine
-		}
-		// unlock write; pending connect
-		c.writeSem <- connPending
-		return errors.Join(ErrSubmit, err)
-	}
-
-	c.writeSem <- conn // unlock write
-	return nil
+	return err
 }
 
 // WriteTo submits the packet. Keep synchronised with writeBuffers!
@@ -942,13 +952,14 @@ func (c *Client) connect() error {
 		return err
 	}
 
-	// update signals
+	// halt Offline signal before connection release
 	blockSignalChan(c.offlineSig)
-	clearSignalChan(c.onlineSig)
-	// release
+	// connection release
 	c.writeSem <- conn
 	c.readConn = conn
 	c.bufr = bufr
+	// release Online signal after connection release
+	clearSignalChan(c.onlineSig)
 	// reset backoff ramp-up
 	c.reconnectWait = 0
 	return nil
@@ -979,8 +990,8 @@ func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error)
 	// Packet.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
 
-	// Don't make Close wait on a slow connect.
-	done := make(chan struct{})
+	// Don't make Close wait on a slow handshake.
+	done := make(chan struct{}, 1)
 	defer close(done)
 	abort := make(chan error, 1)
 	go func() {

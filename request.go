@@ -576,6 +576,8 @@ func (c *Client) PublishExactlyOnceRetained(message []byte, topic string) (excha
 	return c.submitPersisted(packet, c.exactlyOnce)
 }
 
+var errNoConn = errors.New("mqtt: not connected")
+
 func (c *Client) submitPersisted(packet net.Buffers, out outbound) (exchange <-chan error, err error) {
 	// lock sequence
 	seq, ok := <-out.seqSem
@@ -586,7 +588,7 @@ func (c *Client) submitPersisted(packet net.Buffers, out outbound) (exchange <-c
 		out.seqSem <- seq // unlock with updated
 	}()
 
-	hasBacklog := seq.submitN < seq.acceptN
+	nBefore := seq.acceptN - seq.submitN
 
 	// persist
 	done, err := c.applySeqNoAndEnqueue(packet, seq.acceptN, out)
@@ -596,16 +598,22 @@ func (c *Client) submitPersisted(packet net.Buffers, out outbound) (exchange <-c
 	seq.acceptN++
 
 	// submit
-	if hasBacklog {
+	if nBefore != 0 {
 		// buffered channel won't block
-		done <- fmt.Errorf("%w; PUBLISH enqueued", ErrDown)
+		done <- fmt.Errorf("mqtt: %d earlier submissions pending; PUBLISH enqueued",
+			nBefore)
 	} else {
-		err = c.writeBuffersNoWait(packet)
+		err = c.writeBuffers(c.Offline(), packet)
 		if err != nil {
+			// canceled implies offline
+			if errors.Is(err, ErrCanceled) {
+				err = errNoConn
+			}
 			// buffered channel won't block
 			done <- fmt.Errorf("%w; PUBLISH enqueued", err)
 		} else {
-			seq.submitN = seq.acceptN
+			// seq.submitN = seq.acceptN
+			seq.submitN++
 		}
 	}
 

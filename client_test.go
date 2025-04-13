@@ -15,7 +15,9 @@ import (
 	"github.com/pascaldekloe/mqtt/mqtttest"
 )
 
-// VerifyClient reads the client with assertions and timeouts.
+const testTimeout = time.Second
+
+// VerifyClient reads client with assertions and timeouts.
 func verifyClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) {
 	// extra offline state check
 	select {
@@ -72,7 +74,8 @@ func verifyClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) 
 			}
 
 			if len(want) == 0 {
-				t.Errorf("ReadSlices got message %q, topic %q, and error %q, want ErrClosed", message, topic, err)
+				t.Errorf("ReadSlices got message %q, topic %q, and error %q, want ErrClosed",
+					message, topic, err)
 				continue
 			}
 
@@ -129,49 +132,87 @@ func verifyClient(t *testing.T, client *mqtt.Client, want ...mqtttest.Transfer) 
 	})
 }
 
-// NewClientPipe returns a new Client which is connected to a pipe.
-// The channel expires the test when closed.
-func newClientPipe(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.Conn, <-chan struct{}) {
-	client, conns, timeout := newClientPipeN(t, 1, want...)
-	return client, conns[0], timeout
+// NewTestClient returns a new Client which dials to a pipe.
+func newTestClient(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.Conn, <-chan struct{}) {
+	// type of test is slow in general
+	t.Parallel()
+	// start timers after Parallel branche
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	t.Cleanup(cancel)
+	testDeadline, _ := ctx.Deadline()
+
+	clientConn, brokerConn := net.Pipe()
+	// expire I/O mock before tests timeout
+	brokerConn.SetDeadline(testDeadline.Add(-200 * time.Millisecond))
+
+	client := newTestClientDials(t, clientConn)
+	verifyClient(t, client, want...)
+	return client, brokerConn, ctx.Done()
 }
 
-// NewClientPipeN returns a new Client with n piped connections. The client is
-// connected to the first pipe. Reconnects get the remaining pipes in order of
-// appearance. The test fails on fewer connects than n.
-// The channel expires the test when closed.
-func newClientPipeN(t *testing.T, n int, want ...mqtttest.Transfer) (*mqtt.Client, []net.Conn, <-chan struct{}) {
-	// This type of test is slow in general.
+// NewTestClientOnline completes the CONNECT from a newTestClient.
+func newTestClientOnline(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, net.Conn, <-chan struct{}) {
+	client, conn, testTimeout := newTestClient(t, want...)
+	wantConnectExchange(t, conn)
+	wantOnline(t, client, testTimeout)
+	return client, conn, testTimeout
+}
+
+// NewTestClientRedial verifies a newTestClient to dial twice during the test.
+func newTestClientRedial(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, [2]net.Conn, <-chan struct{}) {
+	// type of test is slow in general
 	t.Parallel()
-	// Start timers after Parallel block.
+	// start timers after Parallel branche
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	t.Cleanup(cancel)
+	testDeadline, _ := ctx.Deadline()
 
-	// expire I/O mocks before tests time out
-	brokerDeadline := time.Now().Add(800 * time.Millisecond)
-
-	clientConns := make([]net.Conn, n)
-	brokerConns := make([]net.Conn, n)
+	var clientConns, brokerConns [2]net.Conn
 	for i := range clientConns {
 		clientConns[i], brokerConns[i] = net.Pipe()
-		brokerConns[i].SetDeadline(brokerDeadline)
+		// expire I/O mocks before tests timeout
+		brokerConns[i].SetDeadline(testDeadline.Add(-200 * time.Millisecond))
 	}
 
+	client := newTestClientDials(t, clientConns[:]...)
+	verifyClient(t, client, want...)
+
+	return client, brokerConns, ctx.Done()
+}
+
+// NewTestClientOnlineRedial completes the CONNECT from a newTestClientRedial.
+func newTestClientOnlineRedial(t *testing.T, want ...mqtttest.Transfer) (*mqtt.Client, [2]net.Conn, <-chan struct{}) {
+	client, conns, testTimeout := newTestClientRedial(t, want...)
+	wantConnectExchange(t, conns[0])
+	wantOnline(t, client, testTimeout)
+	return client, conns, testTimeout
+}
+
+func wantConnectExchange(t *testing.T, conn net.Conn) {
+	wantPacketHex(t, conn, "100c00044d515454040000000000") // CONNECT
+	sendPacketHex(t, conn, "20020000")                     // CONNACK
+}
+
+func wantOnline(t *testing.T, client *mqtt.Client, timeout <-chan struct{}) {
+	select {
+	case <-client.Online():
+		break
+	case <-timeout:
+		t.Fatal("test timeout before Online")
+	}
+}
+
+func newTestClientDials(t *testing.T, conns ...net.Conn) *mqtt.Client {
 	client, err := mqtt.VolatileSession("", &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 2,
 		ExactlyOnceMax: 2,
-		Dialer:         newDialerMock(t, 0, clientConns...),
+		Dialer:         newDialerMock(t, 0, conns...),
 	})
 	if err != nil {
 		t.Fatal("volatile session error:", err)
 	}
-
-	verifyClient(t, client, want...)
-	wantPacketHex(t, brokerConns[0], "100c00044d515454040000000000") // CONNECT
-	sendPacketHex(t, brokerConns[0], "20020000")                     // CONNACK
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	t.Cleanup(cancel)
-	return client, brokerConns, ctx.Done()
+	return client
 }
 
 var errLastTestConn = errors.New("Dialer mock exhausted: all connections served")
@@ -399,7 +440,9 @@ func TestDown(t *testing.T) {
 }
 
 func TestReceivePublishAtLeastOnce(t *testing.T) {
-	_, conn, _ := newClientPipe(t, mqtttest.Transfer{Message: []byte("hello"), Topic: "greet"})
+	_, conn, _ := newTestClientOnline(t,
+		mqtttest.Transfer{Message: []byte("hello"), Topic: "greet"},
+	)
 
 	sendPacketHex(t, conn, hex.EncodeToString([]byte{
 		0x32, 14,
@@ -410,9 +453,10 @@ func TestReceivePublishAtLeastOnce(t *testing.T) {
 }
 
 func TestReceivePublishExactlyOnce(t *testing.T) {
-	_, conn, _ := newClientPipe(t, mqtttest.Transfer{Message: []byte("hello"), Topic: "greet"})
+	_, conn, _ := newTestClientOnline(t,
+		mqtttest.Transfer{Message: []byte("hello"), Topic: "greet"},
+	)
 
-	// write PUBLISH
 	sendPacketHex(t, conn, hex.EncodeToString([]byte{
 		0x34, 14,
 		0, 5, 'g', 'r', 'e', 'e', 't',
@@ -425,8 +469,9 @@ func TestReceivePublishExactlyOnce(t *testing.T) {
 
 func TestReceivePublishAtLeastOnceBig(t *testing.T) {
 	const bigN = 256 * 1024
-
-	_, conn, _ := newClientPipe(t, mqtttest.Transfer{Message: bytes.Repeat([]byte{'A'}, bigN), Topic: "bam"})
+	_, conn, _ := newTestClientOnline(t,
+		mqtttest.Transfer{Message: bytes.Repeat([]byte{'A'}, bigN), Topic: "bam"},
+	)
 
 	sendPacketHex(t, conn, "32"+ // publish at least once
 		"878010"+ // size varint 7 + bigN
