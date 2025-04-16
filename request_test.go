@@ -480,7 +480,7 @@ func TestPublishAtLeastOnce_restart(t *testing.T) {
 	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
-		Dialer:         newDialerMock(t, 0, clientConn),
+		Dialer:         newDialerMock(t, clientConn),
 	})
 	if err != nil {
 		t.Fatal("init session got error:", err)
@@ -568,7 +568,7 @@ func TestPublishAtLeastOnce_restart(t *testing.T) {
 	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		AtLeastOnceMax: 3,
-		Dialer:         newDialerMock(t, 0, clientConn),
+		Dialer:         newDialerMock(t, clientConn),
 	})
 	if err != nil {
 		t.Fatal("adopt session got error:", err)
@@ -740,7 +740,7 @@ func TestPublishExactlyOnce_restart(t *testing.T) {
 	client, err := mqtt.InitSession("test-client", mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		ExactlyOnceMax: 5,
-		Dialer:         newDialerMock(t, 0, clientConn),
+		Dialer:         newDialerMock(t, clientConn),
 	})
 	if err != nil {
 		t.Fatal("init session got error:", err)
@@ -875,7 +875,7 @@ func TestPublishExactlyOnce_restart(t *testing.T) {
 	client, warn, err := mqtt.AdoptSession(mqtt.FileSystem(dir), &mqtt.Config{
 		PauseTimeout:   time.Second / 4,
 		ExactlyOnceMax: 5,
-		Dialer:         newDialerMock(t, 0, clientConn),
+		Dialer:         newDialerMock(t, clientConn),
 	})
 	if err != nil {
 		t.Fatal("adopt session got error:", err)
