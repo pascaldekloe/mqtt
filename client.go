@@ -266,18 +266,20 @@ type Client struct {
 	bufr     *bufio.Reader // readConn buffered
 	peek     []byte        // pending slice from bufio.Reader
 
-	// Context is applied during connect for faster aborts.
-	ctx    context.Context
-	cancel context.CancelFunc // Close may cancel the context
+	// Shutdown (from either Close or Disconnect) directly expires the
+	// context used by (re)connect attempts.
+	connectCtx  context.Context
+	connectHalt context.CancelFunc
 
-	// The semaphore locks connection control. A nil entry implies no
-	// connect yet. ConnSem must be held to close writeSem.
+	// Connect, Close and Disconnect all lock connection management with the
+	// signleton entry. A nil entry implies that the Client never connected.
+	// The Client is closed when this channel is closed.
 	connSem chan net.Conn
 
-	// Writes may happen from multiple goroutines. The semaphore contains
-	// either a signal placeholder or the active connection. A connPending
-	// entry signals a first (re)connect attempt, and connDown signals a
-	// failed (re)connect attempt
+	// Writes may happen from multiple goroutines. The signleton entry is
+	// either the current connection or a signal placeholder. ConnPending
+	// signals the first (re)connect attempt, and connDown signals failure
+	// to (re)connect. The Client is closed when this channel is closed.
 	writeSem chan net.Conn
 
 	// The semaphore allows for one ping request at a time.
@@ -376,7 +378,7 @@ func newClient(p Persistence, config *Config) *Client {
 	c.connSem <- nil
 	c.writeSem <- connPending
 
-	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.connectCtx, c.connectHalt = context.WithCancel(context.Background())
 	c.atLeastOnce.seqSem <- seq{}
 	c.exactlyOnce.seqSem <- seq{}
 	return &c
@@ -386,40 +388,36 @@ func newClient(p Persistence, config *Config) *Client {
 // The Client is closed regardless of the error return.
 // Closing an already closed Client has no effect.
 func (c *Client) Close() error {
-	// halt context (interrupts dial & connect)
-	c.cancel()
-
-	// block connection control
-	conn, ok := <-c.connSem
+	// block & terminate connection control
+	c.connectHalt()
+	lastConn, ok := <-c.connSem
 	if !ok {
-		// already closed
-		return nil
+		return nil // already closed
 	}
-	defer func() {
-		// signal offline
-		blockSignalChan(c.onlineSig)
-		clearSignalChan(c.offlineSig)
-		// signal closed
-		close(c.writeSem)
-		close(c.connSem)
-	}()
+	close(c.connSem) // in own lock prevents double close
 
-	// block write, close connection
-	select {
-	case conn = <-c.writeSem:
-		switch conn {
-		case connPending, connDown:
-			return nil // already offline
-		}
-		return conn.Close()
-	default: // no wait for write
-		var err error
-		if conn != nil {
-			err = conn.Close() // may interrupt write
-		}
-		<-c.writeSem // won't block for long now
-		return err
+	var closeErr error
+	if lastConn != nil {
+		// stops ongoing write if any
+		closeErr = lastConn.Close()
 	}
+	// block & terminate write
+	conn := <-c.writeSem
+	// WriteSem is not closed because a close of writeSem only happens with
+	// connSem locked and closed.
+	close(c.writeSem) // in own lock prevents double close
+
+	switch conn {
+	case connPending, connDown:
+		return nil // already offline
+	}
+	// signal offline
+	blockSignalChan(c.onlineSig)
+	clearSignalChan(c.offlineSig)
+	if lastConn == conn {
+		return closeErr
+	}
+	return conn.Close()
 }
 
 // Disconnect tries a graceful termination, which discards the Will.
@@ -432,48 +430,60 @@ func (c *Client) Close() error {
 // disconnect request. As a result, a client can never know for sure
 // whether the operation actually succeeded.
 func (c *Client) Disconnect(quit <-chan struct{}) error {
-	// halt context (interrupts dial & connect)
-	c.cancel()
-
-	// block connection control
-	conn, ok := <-c.connSem
+	// block & terminate connection control
+	c.connectHalt()
+	lastConn, ok := <-c.connSem
 	if !ok {
 		return fmt.Errorf("%w; DISCONNECT not send", ErrClosed)
 	}
-	defer func() {
-		// signal offline
-		blockSignalChan(c.onlineSig)
-		clearSignalChan(c.offlineSig)
-		// signal closed
-		close(c.writeSem)
-		close(c.connSem)
-	}()
+	close(c.connSem) // in own lock prevents double close
 
-	// block write, send disconnect, close connection
+	// block & terminate write
+	var conn net.Conn
+	var didQuit bool
 	select {
-	case <-quit:
-		if conn != nil {
-			conn.Close() // may interrupt write
-		}
-		<-c.writeSem // won't block for long now
-		return fmt.Errorf("%w; DISCONNECT not send", ErrCanceled)
-
 	case conn = <-c.writeSem:
-		switch conn {
-		case connPending, connDown:
-			return fmt.Errorf("%w; DISCONNECT not send", ErrDown)
+		// WriteSem is not closed because a close of writeSem only
+		// happens with connSem locked and closed.
+		didQuit = false
+	case <-quit:
+		if lastConn != nil {
+			// stop ongoing write if any
+			lastConn.Close()
 		}
-
-		// “After sending a DISCONNECT Packet the Client MUST NOT send
-		// any more Control Packets on that Network Connection.”
-		// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
-		writeErr := writeTo(conn, packetDISCONNECT, c.PauseTimeout)
-		closeErr := conn.Close()
-		if writeErr != nil {
-			return fmt.Errorf("%w; DISCONNECT lost", writeErr)
+		// won't block for long now
+		conn = <-c.writeSem
+		if conn != lastConn {
+			conn.Close()
 		}
-		return closeErr
+		didQuit = true
 	}
+	close(c.writeSem) // in own lock prevents double close
+
+	switch conn {
+	case connPending:
+		// allready offline
+		return fmt.Errorf("%w; DISCONNECT not send", errNoConn)
+	case connDown:
+		// allready offline
+		return fmt.Errorf("%w; DISCONNECT not send", ErrDown)
+	}
+	// signal offline
+	blockSignalChan(c.onlineSig)
+	clearSignalChan(c.offlineSig)
+	if didQuit {
+		return fmt.Errorf("%w; DISCONNECT not send", ErrCanceled)
+	}
+
+	// “After sending a DISCONNECT Packet the Client MUST NOT send
+	// any more Control Packets on that Network Connection.”
+	// — MQTT Version 3.1.1, conformance statement MQTT-3.14.4-2
+	writeErr := writeTo(conn, packetDISCONNECT, c.PauseTimeout)
+	closeErr := conn.Close()
+	if writeErr != nil {
+		return fmt.Errorf("%w; DISCONNECT lost", writeErr)
+	}
+	return closeErr
 }
 
 func (c *Client) termCallbacks() {
@@ -649,7 +659,7 @@ func (c *Client) lockWrite(quit <-chan struct{}) (net.Conn, error) {
 			defer checkConnect.Stop()
 		}
 		select {
-		case <-c.ctx.Done():
+		case <-c.connectCtx.Done():
 			return nil, ErrClosed
 		case <-c.Online():
 			break // connect succeeded
@@ -909,16 +919,7 @@ func (c *Client) connect() error {
 		config.CleanSession = false
 	}
 	conn, bufr, err := c.dialAndConnect(&config)
-	switch err {
-	case nil:
-		break
-
-	case context.Canceled:
-		// Close or Disconnect interrupted dial
-		c.connSem <- previousConn // unlock
-		return ErrClosed
-
-	default:
+	if err != nil {
 		// ErrDown after failed connect
 		<-c.writeSem
 		c.writeSem <- connDown
@@ -971,8 +972,8 @@ func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error)
 		return nil, nil, err
 	}
 
-	// network connection
-	ctx := c.ctx
+	// establish network connection
+	ctx := c.connectCtx
 	if c.PauseTimeout != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.PauseTimeout)
@@ -980,44 +981,33 @@ func (c *Client) dialAndConnect(config *Config) (net.Conn, *bufio.Reader, error)
 	}
 	conn, err := c.Dialer(ctx)
 	if err != nil {
-		if e := c.ctx.Err(); e != nil {
-			return nil, nil, e
+		switch {
+		case errors.Is(err, context.Canceled):
+			return nil, nil, fmt.Errorf("%w; dial cancelled", ErrClosed)
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, nil, fmt.Errorf("mqtt: dial timeout (after %s)",
+				c.PauseTimeout)
 		}
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("mqtt: no connect: %w", err)
 	}
 	// “After a Network Connection is established by a Client to a Server,
 	// the first Packet sent from the Client to the Server MUST be a CONNECT
 	// Packet.”
 	// — MQTT Version 3.1.1, conformance statement MQTT-3.1.0-1
 
-	// Don't make Close wait on a slow handshake.
-	done := make(chan struct{}, 1)
-	defer close(done)
-	abort := make(chan error, 1)
-	go func() {
-		defer close(abort)
-		select {
-		case <-c.ctx.Done():
-			conn.Close() // interrupt
-			abort <- ErrClosed
-		case <-done:
-			break
-		}
-	}()
-
-	bufr, err := c.handshake(conn, config, clientID)
-	// ⚠️ delayed error check
-
-	done <- struct{}{}
-	e := <-abort
-	if e != nil {
-		// abort closed connection
-		return nil, nil, e
-	}
-
-	if err != nil {
+	// The connection context applies to the handshake too, as we don't want
+	// slow handshakes to block a shutdown from either Close or Disconnect.
+	stopConnClose := context.AfterFunc(c.connectCtx, func() {
 		conn.Close()
-		return nil, nil, err
+	})
+	bufr, err := c.handshake(conn, config, clientID)
+	if !stopConnClose() {
+		// connect context canceled (by either Close or Disconnect)
+		return nil, nil, ErrClosed
+	}
+	if err != nil {
+		closeErr := conn.Close()
+		return nil, nil, errors.Join(err, closeErr)
 	}
 	return conn, bufr, nil
 }
@@ -1458,8 +1448,8 @@ func (c *Client) onPUBREL() error {
 
 // The write semaphore may hold a connSignal when not connected.
 const (
-	connPending connSignal = iota // first (re)connect attempt.
-	connDown                      // failed (re)connect attempt.
+	connPending connSignal = iota // first (re)connect attempt
+	connDown                      // failed (re)connect attempt
 )
 
 // ConnSignal is a net.Conn.
