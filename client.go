@@ -168,8 +168,8 @@ func (c *Config) valid() error {
 	return nil
 }
 
-// NewCONNREQ returns a new packet.
-func (c *Config) newCONNREQ(clientID []byte) []byte {
+// NewConnectReq returns a new CONNECT packet conform the configuration.
+func (c *Config) newConnectReq(clientID []byte) []byte {
 	size := 12 + len(clientID)
 	var flags uint
 
@@ -1044,9 +1044,9 @@ func (c *Client) resend(conn net.Conn, seqNoOffset uint, seq *seq, space uint) e
 
 func (c *Client) handshake(conn net.Conn, config *Config, clientID []byte) (*bufio.Reader, error) {
 	// send request
-	err := writeTo(conn, config.newCONNREQ(clientID), c.PauseTimeout)
+	err := writeTo(conn, config.newConnectReq(clientID), c.PauseTimeout)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mqtt: connection fatal during CONNECT submission; %w", err)
 	}
 
 	r := bufio.NewReaderSize(conn, readBufSize)

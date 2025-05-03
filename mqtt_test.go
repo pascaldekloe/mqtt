@@ -55,7 +55,7 @@ func TestErrorClasses(t *testing.T) {
 	}
 }
 
-func TestNewCONNREQ(t *testing.T) {
+func TestNewConnectReq(t *testing.T) {
 	c := &Config{
 		Dialer: func(context.Context) (net.Conn, error) {
 			return nil, errors.New("dialer call not allowed for test")
@@ -71,7 +71,7 @@ func TestNewCONNREQ(t *testing.T) {
 	c.Will.AtLeastOnce = true
 	c.Will.ExactlyOnce = true
 
-	got := c.newCONNREQ([]byte("#🤖"))
+	got := c.newConnectReq([]byte("#🤖"))
 	want := []byte{0x10, 37, 0, 4, 'M', 'Q', 'T', 'T', 4, 0b1111_0110, 0x0e, 0x10,
 		0, 5, '#', 0xF0, 0x9F, 0xA4, 0x96,
 		0, 6, 0xe2, 0x98, 0xaf, 0xef, 0xb8, 0x8f,

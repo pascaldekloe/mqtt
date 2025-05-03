@@ -28,12 +28,12 @@ var ErrAbandoned = errors.New("mqtt: request abandoned after submission")
 // status of the execution remains unknown, because there is no telling how much
 // of the payload actually reached the broker. Connection loss after submision
 // causes ErrBreak instead.
-var ErrSubmit = errors.New("mqtt: connection lost during submission")
+var ErrSubmit = errors.New("mqtt: connection fatal during submission")
 
 // ErrBreak signals that the connection was lost after a request was send, and
 // before a response was received. The status of the execution remains unknown,
 // similar to ErrSubmit.
-var ErrBreak = errors.New("mqtt: connection lost while awaiting response")
+var ErrBreak = errors.New("mqtt: connection fatal while awaiting response")
 
 // BufSize should fit topic names with a bit of overhead.
 const bufSize = 128
