@@ -692,7 +692,7 @@ func (c *Client) write(quit <-chan struct{}, p []byte) error {
 		clearSignalChan(c.offlineSig)
 		// unlock write in connection-pending state
 		c.writeSem <- connPending
-		return errors.Join(ErrSubmit, err)
+		return fmt.Errorf("%w; %w", ErrSubmit, err)
 	}
 
 	c.writeSem <- conn // unlock write
@@ -718,7 +718,7 @@ func (c *Client) writeBuffers(quit <-chan struct{}, p net.Buffers) error {
 		clearSignalChan(c.offlineSig)
 		// unlock write in connection-pending state
 		c.writeSem <- connPending
-		return errors.Join(ErrSubmit, err)
+		return fmt.Errorf("%w; %w", ErrSubmit, err)
 	}
 
 	c.writeSem <- conn // unlock write
