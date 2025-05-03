@@ -426,9 +426,9 @@ func (c *Client) Close() error {
 // Quit is optional, as nil just blocks. Appliance of quit will strictly result
 // in ErrCanceled.
 //
-// BUG(pascaldekloe): The MQTT protocol has no confirmation for the
-// disconnect request. As a result, a client can never know for sure
-// whether the operation actually succeeded.
+// BUG(pascaldekloe):
+// The MQTT protocol has no confirmation for disconnect request.
+// A Client can't know for sure whether the operation succeeded.
 func (c *Client) Disconnect(quit <-chan struct{}) error {
 	// block & terminate connection control
 	c.connectHalt()
@@ -1205,11 +1205,12 @@ func (c *Client) readSlices() (message, topic []byte, err error) {
 
 	// acknowledge previous packet, if any
 	if len(c.pendingAck) != 0 {
-		// BUG(pascaldekloe): Save errors from Persistence can cause
-		// duplicate reception of messages with the “exactly once”
-		// guarantee, but only in a follow-up with AdoptSession, and
-		// only if the Client which encountered Persistence failure
-		// goes down before automatic-recovery in ReadSlices succeded.
+		// BUG(pascaldekloe):
+		// Save errors from Persistence may cause duplicate reception
+		// of messages with the “exactly once” guarantee, but only in
+		// a follow-up with AdoptSession, and only if the Client which
+		// encountered the Persistence failure went down before its
+		// automatic-recovery (from ReadSlices) succeeded.
 		if c.pendingAck[0]>>4 == typePUBREC {
 			key := uint(binary.BigEndian.Uint16(c.pendingAck[2:4])) | remoteIDKeyFlag
 			err = c.persistence.Save(key, net.Buffers{c.pendingAck})

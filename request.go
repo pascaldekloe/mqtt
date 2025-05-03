@@ -924,10 +924,10 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		seq := <-client.atLeastOnce.seqSem
 		seq.acceptN = last + 1
 		// BUG(pascaldekloe):
-		//  AdoptSession assumes that all publish-at-least-once packets
-		//  were submitted before already. Persisting the actual state
-		//  after each network submission seems like too much just for
-		//  the DUP flag to be slightly more precise.
+		// AdoptSession assumes that all publish-at-least-once packets
+		// were submitted before already. Persisting the actual state
+		// after each network submission seems like an overkill for
+		// the DUP flag to be more accurate.
 		seq.submitN = seq.acceptN
 		client.atLeastOnce.seqSem <- seq
 	}
@@ -964,10 +964,10 @@ func AdoptSession(p Persistence, c *Config) (client *Client, warn []error, fatal
 		seq := <-client.exactlyOnce.seqSem
 		seq.acceptN = last + 1
 		// BUG(pascaldekloe):
-		//  AdoptSession assumes that all publish-exactly-once packets
-		//  were submitted before already. Persisting the actual state
-		//  after each network submission seems like too much just for
-		//  the DUP flag to be slightly more precise.
+		// AdoptSession assumes that all publish-exactly-once packets
+		// were submitted before already. Persisting the actual state
+		// after each network submission seems like an overkill for
+		// the DUP flag to be more accurate.
 		seq.submitN = seq.acceptN
 		client.exactlyOnce.seqSem <- seq
 	}
